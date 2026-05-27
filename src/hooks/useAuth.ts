@@ -74,10 +74,18 @@ export function useAuth() {
   const logout = useCallback(async () => {
     try {
       await authApi.logout();
+    } catch {
+      /* 백엔드 401/403 무시 — 어차피 클라이언트 상태 초기화 */
     } finally {
       tokenStore.clear();
       localStorage.removeItem(USER_KEY);
       setUser(null);
+      // useAuth가 Context Provider가 아니라 컴포넌트별 독립 state라서
+      // setUser(null)만으로는 다른 컴포넌트 화면이 안 바뀜.
+      // 페이지 강제 reload로 모든 컴포넌트 재마운트 → /login으로 이동.
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login';
+      }
     }
   }, []);
 
