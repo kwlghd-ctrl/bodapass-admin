@@ -1,15 +1,8 @@
-/**
- * NontaxableSection — 근로자 등록·수정 폼에 끼워넣는 「비과세 항목」 섹션
- *
- *  · 5개 항목 입력란 (식대/자가운전/출장/출산보육/기타)
- *  · 각 항목 옆에 법정 한도 표시 + 초과 시 경고
- *  · 합계 자동 계산 + 「과세 보수 = 월 지급액 - 비과세」 미리보기
- */
-
 import type { TeamMember } from '../api/team.types';
 import {
   NONTAX_LABELS,
   NONTAX_LIMITS,
+  childcareLimit,
   totalNontaxable,
 } from '../utils/nontaxable';
 import './NontaxableSection.css';
@@ -19,28 +12,40 @@ type Nontax = NonNullable<TeamMember['nontaxable']>;
 interface Props {
   value: Nontax;
   onChange: (next: Nontax) => void;
-  /** 월 예상 지급액 (옵션) — 입력하면 「과세 보수」 미리보기 표시 */
   monthlyEstimate?: number;
+  childrenUnder6Count?: number;
+  onChildrenUnder6CountChange?: (n: number) => void;
 }
 
-const FIELDS: Array<{
-  key: keyof Nontax;
-  hint: string;
-}> = [
+const FIELDS: Array<{ key: keyof Nontax; hint: string }> = [
   { key: 'meal',      hint: '월 20만원 한도 — 사내급식 미제공 시 식비 보전' },
   { key: 'vehicle',   hint: '월 20만원 한도 — 본인 명의 차량을 업무에 사용' },
   { key: 'travel',    hint: '실비 정산 — 영수증 보관 필수' },
-  { key: 'childcare', hint: '월 10만원 한도 — 6세 이하 자녀' },
+  { key: 'childcare', hint: '6세 이하 자녀 1인당 월 20만원 — 자녀 수 입력 필요' },
   { key: 'other',     hint: '기타 비과세 (학자금, 직무발명보상금 등)' },
 ];
 
-export function NontaxableSection({ value, onChange, monthlyEstimate }: Props) {
-  const nontaxTotal = totalNontaxable({ nontaxable: value } as unknown as TeamMember);
+export function NontaxableSection({
+  value,
+  onChange,
+  monthlyEstimate,
+  childrenUnder6Count = 0,
+  onChildrenUnder6CountChange,
+}: Props) {
+  const ctx = { childrenUnder6Count };
+  const nontaxTotal = totalNontaxable({ nontaxable: value } as unknown as TeamMember, ctx);
   const taxable = monthlyEstimate != null ? Math.max(0, monthlyEstimate - nontaxTotal) : null;
+  const childcareLim = childcareLimit(childrenUnder6Count);
 
   function setField(key: keyof Nontax, raw: string) {
     const num = Number(raw.replace(/[^0-9]/g, ''));
     onChange({ ...value, [key]: isNaN(num) ? 0 : num });
+  }
+
+  function setChildren(raw: string) {
+    const num = Number(raw.replace(/[^0-9]/g, ''));
+    const safe = Math.max(0, Math.min(10, isNaN(num) ? 0 : num));
+    onChildrenUnder6CountChange?.(safe);
   }
 
   return (
@@ -52,10 +57,39 @@ export function NontaxableSection({ value, onChange, monthlyEstimate }: Props) {
         </span>
       </div>
 
+      <div
+        className="nontax__field"
+        style={{
+          gridColumn: '1 / -1',
+          background: '#f9f9fb',
+          borderRadius: 10,
+          padding: 12,
+          marginBottom: 8,
+        }}
+      >
+        <span className="nontax__label">6세 이하 자녀 수</span>
+        <span className="nontax__input-wrap">
+          <input
+            type="text"
+            inputMode="numeric"
+            className="nontax__input"
+            value={childrenUnder6Count ? String(childrenUnder6Count) : ''}
+            onChange={(e) => setChildren(e.target.value)}
+            placeholder="0"
+            disabled={!onChildrenUnder6CountChange}
+            style={{ width: 80, textAlign: 'right' }}
+          />
+          <span className="nontax__unit">명</span>
+        </span>
+        <span className="nontax__hint">
+          자녀 1인당 월 20만원까지 출산·보육수당 비과세 한도 적용 (현재 한도: {childcareLim.toLocaleString()}원)
+        </span>
+      </div>
+
       <div className="nontax__grid">
         {FIELDS.map(({ key, hint }) => {
           const cur = value[key] || 0;
-          const limit = NONTAX_LIMITS[key];
+          const limit = key === 'childcare' ? childcareLim : NONTAX_LIMITS[key];
           const exceeded = limit > 0 && cur > limit;
           return (
             <label key={String(key)} className={'nontax__field' + (exceeded ? ' is-exceeded' : '')}>

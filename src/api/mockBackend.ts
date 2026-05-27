@@ -94,18 +94,22 @@ import type {
 } from './attendance.types';
 import { calcGongsu, isEarly, isLate } from '../utils/gongsu';
 import { localYearMonth } from '../utils/dateLocal';
-import { calcWageBreakdown } from '../utils/wageCalc';
 import type { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
+import { registerV2Routes } from './mockBackendV2';
+import type { AttendanceRecord as V2AttendanceRecord } from './attendanceV2.types';
+import { aggregateMonthlyAttendance } from '../utils/attendanceAggregation';
+import { calculateMonthlyWageLedger } from '../domain/wageLedger/wageLedgerCalculator';
+import { adaptLedgersToWageMonthSummary } from '../utils/adaptLedgersToWageMonthSummary';
 
 type Method = 'get' | 'post' | 'put' | 'patch' | 'delete';
-interface MockReq { url: string; method: Method; data?: any; params?: any; }
+interface MockReq { url: string; method: Method; data?: any; params?: any; pathParams?: string[]; }
 interface MockResult { status: number; data?: any; }
 type Handler = (req: MockReq) => MockResult | Promise<MockResult>;
 
 const STORAGE_KEY = 'ilgampack_admin:mockdb';
 const SEED_VERSION_KEY = 'ilgampack_admin:mockdb:version';
 /** 시드를 변경할 때 이 버전을 올리면 사용자 브라우저의 캐시가 자동으로 갱신됩니다. */
-const SEED_VERSION = '2026-05-12-v46-bugfix-utc-cap-cache';
+const SEED_VERSION = '2026-05-12-v47-legal-calc-fields';
 const DELAY_MS = 300;
 const wait = (ms = DELAY_MS) => new Promise((r) => setTimeout(r, ms));
 
@@ -172,14 +176,40 @@ function buildSeed() {
     ownerCompanyId: d.ownerCompanyId,
     inviteCode: ('GANG' + d.id.slice(-4)).toUpperCase(),
     geofence: defaultGeofenceForCity(d.city),
-    // 시연 — 대전 R&D 센터 / 세종 행정타운은 「본사 직접 처리」 모드, 그 외엔 「현장 사무실 처리」
     attendanceConfirmMode:
       d.id === 'S-2026-1057' || d.id === 'S-2025-1011' ? 'HQ_DIRECT' : 'SITE_OFFICE',
+    // ─── 법정 계산 필드 (v47) ──────────────────
+    constructionStartDate: d.start,
+    constructionEndDate: d.end,
+    completionDate: d.status === 'COMPLETED' ? d.end : undefined,
+    constructionAmount: d.amount,
+    constructionType: 'NEW_BUILD',
+    severanceApplicable: true,
+    insuranceReportType: 'CONSTRUCTION_SELF',
   }));
 
   // ─── 회사 시드 (1개) — AKOMA건설만 ───
+  //   법정 필드 (v47): businessNumber, companyType, employmentInsuranceManagementNo,
+  //   industrialAccidentInsuranceManagementNo, constructionLicenseType, constructionLicenseNo,
+  //   employeeCount, durunuriEligible 도 함께 시드.
   const companies: Company[] = [
-    { id: 'C-001', name: '(주)AKOMA건설', bizNo: '123-45-67890', companyCode: 'C-26-000001', representative: '아코마', ownerUserId: 'A-001', createdAt: new Date('2024-01-01').toISOString() },
+    {
+      id: 'C-001', name: '(주)AKOMA건설',
+      bizNo: '123-45-67890',
+      companyCode: 'C-26-000001',
+      representative: '아코마',
+      ownerUserId: 'A-001',
+      createdAt: new Date('2024-01-01').toISOString(),
+      // ─── 법정 계산 필드 (v47) ──────────────────
+      businessNumber: '123-45-67890',
+      companyType: 'PRIME',
+      employmentInsuranceManagementNo: '12345-6-78901',
+      industrialAccidentInsuranceManagementNo: '12345-6-78902',
+      constructionLicenseType: 'GENERAL',
+      constructionLicenseNo: '서울-건축-2024-12345',
+      employeeCount: 8,        // 두루누리 적격 (10명 미만)
+      durunuriEligible: true,
+    } as any,
   ];
 
   // ─── SiteCompany 시드 — 각 현장의 원도급(AKOMA) 만 ───
@@ -353,6 +383,11 @@ function buildSeed() {
     const idPair = idOf(idx, m.isForeign);
     const assignedForeman = foremen[m.foremanIdx];
     const targetSite = m.siteIdx === 1 ? daejeonSite : busanSite;
+    // 생년월일 — 주민번호 앞 6자리로부터 합성
+    const birth6 = idPair.raw.slice(0, 6);
+    const yyPart = Number(birth6.slice(0, 2));
+    const yearPrefix = yyPart >= 60 ? '19' : '20';
+    const birthDate = `${yearPrefix}${birth6.slice(0, 2)}-${birth6.slice(2, 4)}-${birth6.slice(4, 6)}`;
     return {
       id: m.id,
       name: m.name,
@@ -379,7 +414,34 @@ function buildSeed() {
       faceVerified: true,
       workerCode: workerCodeOf(m.id),
       trustTier: 1,
-    };
+      // ─── 법정 계산 필드 (v47) ──────────────────
+      birthDate,
+      gender: idx % 7 === 5 ? 'F' : 'M' as any,
+      nationality: m.isForeign ? 'IN' : 'KR' as any,
+      residentType: m.isForeign ? 'FOREIGN' : 'DOMESTIC' as any,
+      visaType: m.isForeign ? 'E-9' : undefined,
+      verification: {
+        identityVerified: true,
+        faceRegistered: true,
+        bankVerified: true,
+        privacyAgreed: true,
+        contractSigned: true,
+      },
+      taxProfile: {
+        dependentsCount: idx % 4,
+        childrenUnder6Count: idx % 3 === 0 ? 1 : 0,
+        nonTaxableItems: ['MEAL', 'VEHICLE'],
+      },
+      insuranceProfile: {
+        nationalPensionTarget: true,
+        healthInsuranceTarget: true,
+        employmentInsuranceTarget: true,
+        industrialAccidentTarget: true,
+        durunuriCandidate: m.dailyWage <= 230_000,
+        // 시연: 짝수 인덱스 = 가입 이력 없음(신규가입자), 홀수 = 있음(기존가입자)
+        insuranceHistoryLast12Months: idx % 2 === 1,
+      },
+    } as any;
   });
 
   const invites: Array<{
@@ -824,11 +886,19 @@ route('patch', /^\/sites\/[^/]+$/, async (req) => {
   if (idx < 0) return { status: 404, data: { message: '현장을 찾을 수 없습니다.' } };
   // 수정 허용 필드 (시연용 — 운영에서는 스키마 기반 검증)
   const allowed: (keyof Site)[] = [
-    'name', 'contractKind', 'contractAmount', 'contractDate', 'startDate', 'endDate',
-    'client', 'address', 'addressDetail', 'manager', 'managerPhone', 'managerFax',
+    'name', 'contractKind', 'contractDescription', 'contractAmount',
+    'contractDate', 'startDate', 'endDate', 'bidNoticeDate', 'insuranceBaseDate',
+    'client', 'clientType', 'zipCode', 'address', 'addressDetail',
+    'manager', 'managerPhone', 'managerFax',
     'progressPercent', 'status',
     'siteAgent', 'safetyOfficer', 'qualityInspector', 'workDescription',
-    'scale', 'ownerCompanyId',
+    'scale', 'ownerCompanyId', 'workerCount',
+    // ─── 지오펜스 ───
+    'geofence', 'attendanceConfirmMode',
+    // ─── 법정 계산 필드 (Phase 4) ───
+    'constructionStartDate', 'constructionEndDate', 'completionDate',
+    'constructionAmount', 'constructionType', 'severanceApplicable',
+    'insuranceReportType', 'severanceFundMode', 'severanceFundCustomAmount',
   ];
   const cur = db.sites[idx];
   const next: Site = { ...cur };
@@ -870,6 +940,18 @@ route('post', /^\/sites$/, async (req) => {
     progressPercent: 0,
     workerCount: { formwork: 0, masonry: 0, facility: 0, electric: 0 },
     status: 'IN_PROGRESS', createdAt: new Date().toISOString(),
+    // ─── 지오펜스 ───
+    geofence: body.geofence,
+    // ─── 법정 계산 필드 (Phase 4) ───
+    constructionStartDate: body.constructionStartDate ?? body.startDate,
+    constructionEndDate: body.constructionEndDate ?? body.endDate,
+    completionDate: body.completionDate,
+    constructionAmount: body.constructionAmount ?? body.contractAmount ?? 0,
+    constructionType: body.constructionType,
+    severanceApplicable: body.severanceApplicable ?? true,
+    insuranceReportType: body.insuranceReportType ?? 'CONSTRUCTION_SELF',
+    severanceFundMode: body.severanceFundMode,
+    severanceFundCustomAmount: body.severanceFundCustomAmount,
   };
   db.sites = [...(db.sites ?? []), newSite];
   // 새 현장은 GET /sites 가시성 필터 (SiteCompany 멤버십 기반) 를 통과해야 하므로
@@ -1384,6 +1466,7 @@ function maskAccount(raw?: string) {
 }
 
 route('get', /^\/wage\/month$/, async (req) => {
+  // Phase T2 — calculateMonthlyWageLedger 엔진 기반 (5+ 페이지가 같은 산식을 봄)
   const db = loadDb();
   const params = req.params ?? {};
   const siteId = (params.siteId as string) ?? db.sites?.[0]?.id ?? '';
@@ -1391,48 +1474,108 @@ route('get', /^\/wage\/month$/, async (req) => {
   const [yStr, mStr] = yearMonth.split('-');
   const year = Number(yStr); const month = Number(mStr);
   const members = (db.members ?? []).filter((m) => m.siteId === siteId);
+  const site = (db.sites ?? []).find((s) => s.id === siteId) as any;
   const attBucket = loadAttendanceBucket(siteId, yearMonth);
-  const rows: WageRow[] = members.map((m) => {
-    let totalGongsu = 0;
-    let workDays = 0;
-    for (const r of Object.values(attBucket.records)) {
-      if (r.memberId !== m.id) continue;
-      if (r.gongsu > 0) { totalGongsu += r.gongsu; workDays += 1; }
-    }
-    const age = 35;
-    const w = calcWageBreakdown({ dailyWage: m.dailyWage, totalGongsu, workDays, age });
-    const accident = 0;
-    const dedTotal = w.incomeTax + w.localTax + w.health + w.longCare + w.pension + w.employment + accident;
-    const severance = Math.round((w.basePay * (1 / 12)) / 1000) * 1000;
-    return {
-      memberId: m.id, memberName: m.name, idNumberMasked: m.idNumberMasked, role: m.role,
-      workDays, dailyWage: m.dailyWage, baseAmount: w.basePay,
-      deductionPension: w.pension,
-      deductionHealth: w.health + w.longCare,
-      deductionEmployment: w.employment,
-      deductionAccident: accident,
-      deductionIncomeTax: w.incomeTax,
-      deductionLocalTax: w.localTax,
-      deductionTotal: dedTotal,
-      netAmount: w.grossPay - dedTotal,
-      severanceAccrued: severance,
-    };
-  });
-  const byRoleMap = new Map<string, { count: number; days: number; net: number }>();
-  for (const r of rows) {
-    const cur = byRoleMap.get(r.role) ?? { count: 0, days: 0, net: 0 };
-    byRoleMap.set(r.role, { count: cur.count + 1, days: cur.days + r.workDays, net: cur.net + r.netAmount });
+
+  // V1 (memberId 기반) record → V2 (employmentId 기반) record 어댑팅
+  //   - employmentId := memberId (1:1 매핑, mock 한정)
+  //   - companyId    := site.companyId 또는 빈문자
+  //   - workDate     := date
+  const companyId = site?.companyId ?? '';
+  const v2Records: V2AttendanceRecord[] = [];
+  for (const v of Object.values(attBucket.records)) {
+    const m = members.find((mm) => mm.id === v.memberId);
+    if (!m) continue;
+    v2Records.push({
+      id: v.id,
+      date: v.date,
+      workDate: v.date,
+      employmentId: m.id,
+      workerCode: m.id,
+      workerName: m.name,
+      trade: m.role as any,
+      siteId,
+      companyId,
+      checkInAt: v.checkInAt,
+      checkOutAt: v.checkOutAt,
+      checkInMethod: v.checkInMethod,
+      checkOutMethod: v.checkOutMethod,
+      checkInScore: v.checkInScore,
+      checkOutScore: v.checkOutScore,
+      status: v.status as any,
+      workedMinutes: v.workedMinutes ?? 0,
+      gongsu: v.gongsu ?? 0,
+      dailyWage: m.dailyWage,
+      payAmount: v.payAmount ?? Math.round((v.gongsu ?? 0) * m.dailyWage),
+      dailyWageSnapshot: m.dailyWage,
+    });
   }
-  const totalDays = rows.reduce((s, r) => s + r.workDays, 0);
-  const totalBase = rows.reduce((s, r) => s + r.baseAmount, 0);
-  const totalDeduction = rows.reduce((s, r) => s + r.deductionTotal, 0);
-  const totalNet = rows.reduce((s, r) => s + r.netAmount, 0);
-  const totalSeverance = rows.reduce((s, r) => s + r.severanceAccrued, 0);
-  const summary: WageMonthSummary = {
-    year, month, totalDays, totalBase, totalDeduction, totalNet, totalSeverance,
-    byRole: Array.from(byRoleMap.entries()).map(([role, v]) => ({ role: role as WageRow['role'], ...v })),
-    rows,
-  };
+
+  // Employment-like 입력 (engine 은 Pick 만 필요)
+  const employments = members.map((m) => ({
+    id: m.id,
+    workerId: m.id,
+    siteCompanyId: m.siteCompanyId ?? '',
+    dailyWage: m.dailyWage,
+    insurance: undefined,
+    nontaxable: undefined,
+    insuranceApplied: true,
+    severanceApplied: true,
+    taxApplied: true,
+  }));
+
+  const summaries = aggregateMonthlyAttendance(v2Records, employments as any);
+  const ledgers = summaries.map((sm) => {
+    const emp = employments.find((e) => e.id === sm.employmentId);
+    const empRecords = v2Records.filter((r) => r.employmentId === sm.employmentId);
+    // Phase U5: worker 객체 전달 — 4대보험 자격판정·외국인 거주자/비거주자 구분에 필요.
+    // db.workers 가 있으면 우선 사용, 없으면 legacy members 에서 만든 adapter 사용.
+    const workerRaw = ((db as any).workers ?? []).find((w: any) => w.id === emp?.workerId);
+    const legacyMember = members.find((m) => m.id === sm.employmentId);
+    const workerLike: any = workerRaw ?? (legacyMember ? {
+      birthDate: (legacyMember as any).birthDate ?? null,
+      residentType: (legacyMember as any).residentType ?? 'KOREAN',
+      visaType: (legacyMember as any).visaType ?? null,
+      taxProfile: { childrenUnder6Count: 0 },
+      insuranceProfile: { insuranceHistoryLast12Months: null },
+    } : null);
+    return calculateMonthlyWageLedger({
+      summary: sm,
+      employment: emp as any,
+      worker: workerLike,
+      site: site as any,
+      records: empRecords,
+    });
+  });
+
+  // 출퇴근이 0건인 멤버도 행으로 노출하기 위해 빈 ledger 추가
+  for (const m of members) {
+    if (!ledgers.find((l) => l.employmentId === m.id)) {
+      ledgers.push({
+        employmentId: m.id,
+        siteId, companyId,
+        yearMonth,
+        workDays: 0, gongsuTotal: 0, workedMinutesTotal: 0,
+        grossWage: 0, taxableWage: 0, nonTaxableAmount: 0,
+        incomeTax: 0, localIncomeTax: 0,
+        nationalPension: 0, healthInsurance: 0, longTermCareInsurance: 0, employmentInsurance: 0,
+        industrialAccidentInsurance: 0,
+        deductionTotal: 0, netPay: 0,
+        severanceWorkDays: 0, severanceFundDaily: undefined, severanceFundAmount: 0,
+        calculationStatus: 'BLOCKED',
+        warnings: ['출역 0건'],
+        lockLevel: 'ESTIMATED',
+      } as any);
+    }
+  }
+
+  const summary = adaptLedgersToWageMonthSummary(ledgers, {
+    nameByEmploymentId: new Map(members.map((m) => [m.id, m.name])),
+    roleByEmploymentId: new Map(members.map((m) => [m.id, m.role])),
+    idMaskedByEmploymentId: new Map(members.map((m) => [m.id, m.idNumberMasked])),
+    dailyWageByEmploymentId: new Map(members.map((m) => [m.id, m.dailyWage])),
+    year, month,
+  });
   return { status: 200, data: summary };
 });
 route('get', /^\/severance\/month$/, async (req) => {
@@ -3352,13 +3495,28 @@ route('get', /^\/safety\/recommendations$/, async () => {
 });
 
 export function setupMockBackend(client?: AxiosInstance) {
+  // V2 라우트 등록 — Worker/Employment/CloseStatus/AuditLog 기반
+  registerV2Routes({
+    route,
+    loadDb,
+    saveDb,
+    loadAttendanceBucket,
+    saveAttendanceBucket,
+    currentUserOf,
+    deterministicRandom,
+  });
   if (typeof window === 'undefined') return;
   if (!client) return;
   client.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
     await wait();
     const method = (config.method ?? 'get').toLowerCase() as Method;
     const url = (config.url ?? '').replace(/^\/api/, '') || '/';
-    const matched = handlers.find((r) => r.method === method && r.pattern.test(url));
+    let matchResult: RegExpExecArray | null = null;
+    const matched = handlers.find((r) => {
+      if (r.method !== method) return false;
+      matchResult = r.pattern.exec(url);
+      return matchResult !== null;
+    });
     if (!matched) {
       return Promise.reject({
         response: {
@@ -3375,11 +3533,16 @@ export function setupMockBackend(client?: AxiosInstance) {
     if (typeof parsedData === 'string') {
       try { parsedData = JSON.parse(parsedData); } catch { /* keep as-is */ }
     }
+    // 정규식 캡처 그룹을 pathParams 로 전달 — V2 라우트가 :id 같은 경로 변수를 사용
+    const pathParams: string[] = matchResult
+      ? Array.from(matchResult as unknown as ArrayLike<string>).slice(1).map((s) => s ?? '')
+      : [];
     const result = await matched.fn({
       url,
       method,
       data: parsedData,
       params: (config.params ?? {}) as Record<string, unknown>,
+      pathParams,
     });
     if (result.status >= 200 && result.status < 300) {
       return {
@@ -3402,3 +3565,4 @@ export function setupMockBackend(client?: AxiosInstance) {
     });
   };
 }
+

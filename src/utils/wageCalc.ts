@@ -1,4 +1,13 @@
 /**
+ * @deprecated Phase U6 — 본 모듈의 임금/세금/보험 계산식은 사용 금지.
+ *
+ * 신규 코드는 src/domain/wageLedger/wageLedgerCalculator.ts 의
+ * calculateMonthlyWageLedger() 를 사용합니다.
+ *
+ * 본 파일은 backward compat 만 유지. Phase 5 (실서버 전환) 시 제거 예정.
+ */
+
+/**
  * 노임대장 계산식 — 출처: "노임대장계산식.xlsx" Sheet1 (BE6~BE26)
  *
  * 한 사람의 한 달 임금을 계산하는 식.

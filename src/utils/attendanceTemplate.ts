@@ -22,7 +22,24 @@
  *  업로드 시 동일 시트 구조를 readback 하여 attendance 버킷에 적재 (parser는 별도 phase).
  */
 
-import ExcelJS from 'exceljs';
+/*
+ * ⚠ TODO(보안 — 실서비스 전환 시):
+ *   xlsx 라이브러리는 HIGH 등급 취약점이 보고됨 (Prototype Pollution / ReDoS).
+ *   실서비스에서는 다음 endpoint 로 서버측 파싱으로 전환:
+ *
+ *     POST /v2/attendance/ecard-compare   (전자카드 비교)
+ *     POST /v2/wage/ledger/parse          (노임대장 파싱)
+ *     POST /v2/wage/ledger/generate       (노임대장 생성)
+ *     POST /v2/attendance/template/build  (출퇴근 양식 빌드)
+ *     POST /v2/insurance/filing/generate  (4대보험 신고서 생성)
+ *     POST /v2/insurance/filing/parse     (4대보험 신고서 파싱)
+ *
+ *   서버는 격리된 환경(예: AWS Lambda + temp directory)에서
+ *   안전한 라이브러리(openpyxl, Apache POI, libreoffice)로 처리.
+ *   클라이언트는 파일 업로드 + 결과만 받음 — xlsx 라이브러리 미사용.
+ */
+
+import type ExcelJSType from 'exceljs';  // 타입만 사용
 import { localDateStr } from './dateLocal';
 import type { TeamMember } from '../api/team.types';
 import type { Site } from '../api/site.types';
@@ -42,12 +59,14 @@ function daysInMonth(yearMonth: string): number {
   return new Date(y, m, 0).getDate();
 }
 
-export async function buildAttendanceTemplateWorkbook(args: BuildArgs): Promise<ExcelJS.Workbook> {
+export async function buildAttendanceTemplateWorkbook(args: BuildArgs): Promise<ExcelJSType.Workbook> {
   const { site, members, yearMonth, companyName } = args;
   const days = daysInMonth(yearMonth);
   const [year, month] = yearMonth.split('-').map(Number);
 
-  const wb = new ExcelJS.Workbook();
+  const ExcelJSMod = (await import('exceljs')).default;
+
+  const wb = new ExcelJSMod.Workbook();
   wb.creator = '보다패스 (BodaPass)';
   wb.created = new Date();
 

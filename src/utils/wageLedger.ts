@@ -9,10 +9,27 @@
  * 4. localStorage에 누적 보관 (관리자가 시간순으로 모든 노임대장 이력을 보관)
  */
 
-import * as XLSX from 'xlsx';
+/*
+ * ⚠ TODO(보안 — 실서비스 전환 시):
+ *   xlsx 라이브러리는 HIGH 등급 취약점이 보고됨 (Prototype Pollution / ReDoS).
+ *   실서비스에서는 다음 endpoint 로 서버측 파싱으로 전환:
+ *
+ *     POST /v2/attendance/ecard-compare   (전자카드 비교)
+ *     POST /v2/wage/ledger/parse          (노임대장 파싱)
+ *     POST /v2/wage/ledger/generate       (노임대장 생성)
+ *     POST /v2/attendance/template/build  (출퇴근 양식 빌드)
+ *     POST /v2/insurance/filing/generate  (4대보험 신고서 생성)
+ *     POST /v2/insurance/filing/parse     (4대보험 신고서 파싱)
+ *
+ *   서버는 격리된 환경(예: AWS Lambda + temp directory)에서
+ *   안전한 라이브러리(openpyxl, Apache POI, libreoffice)로 처리.
+ *   클라이언트는 파일 업로드 + 결과만 받음 — xlsx 라이브러리 미사용.
+ */
+
+import type * as XLSXType from 'xlsx';  // 타입만 사용
 import { localYearMonth } from './dateLocal';
-import ExcelJS from 'exceljs';
-import type { WageMonthSummary } from '../api/wage.types';
+import type ExcelJSType from 'exceljs';  // 타입만 사용
+import type { WageMonthSummary, WageRow } from '../api/wage.types';
 import type { Site } from '../api/site.types';
 
 const TEMPLATE_URL = '/templates/wage-ledger-template.xlsx';
@@ -67,6 +84,58 @@ export interface LedgerDoc {
   uploadedFileName?: string;
 }
 
+/**
+ * Phase Y3 / Phase Z1 — 1~31일 공수 마킹.
+ *
+ * 우선순위:
+ *   1) row.dailyAttendanceRows (Phase Z1) — 실제 finalGongsu (0.5/1.0/1.5/2.0) 그대로.
+ *   2) row.dailyTaxRows.workDate (Phase Y3 호환) — 1.0 으로 채움 (fallback).
+ *
+ * Phase Y3 까지는 dailyTaxRows 만 보고 모든 근로일을 1.0 으로만 표기했지만,
+ * 실제 출역은 반공/연장(0.5/1.5/2.0) 이 섞여 있어 노임대장이 부정확했다.
+ * Phase Z1 부터 dailyAttendanceRows.finalGongsu 를 직접 표시한다.
+ *
+ * @param row WageRow — dailyAttendanceRows 또는 dailyTaxRows 가 있어야 정확. 없으면 전부 0.
+ * @returns number[31] — index i 는 (i+1)일. 값=공수 (0.5/1.0/1.5/2.0/0).
+ */
+export function buildDailyGongsuFromDailyTaxRows(row: WageRow): number[] {
+  const arr = new Array<number>(31).fill(0);
+  // Phase Z1 우선 — 실제 출역 finalGongsu
+  if (row.dailyAttendanceRows && row.dailyAttendanceRows.length > 0) {
+    for (const a of row.dailyAttendanceRows) {
+      const day = Number(a.workDate?.slice(8, 10));
+      if (day >= 1 && day <= 31) {
+        arr[day - 1] = a.finalGongsu ?? 0;
+      }
+    }
+    return arr;
+  }
+  // Fallback — dailyTaxRows 기준 (Y3 동작 유지)
+  for (const d of row.dailyTaxRows ?? []) {
+    const day = Number(d.workDate?.slice(8, 10));
+    if (day >= 1 && day <= 31) {
+      arr[day - 1] = 1.0;
+    }
+  }
+  return arr;
+}
+
+/**
+ * @deprecated Phase Y3 — 노임대장에서는 사용 중지.
+ *  실제 workDate 가 없는 옛 시드/외부 입력 호환용으로만 잠시 노출.
+ *  새 코드는 buildDailyGongsuFromDailyTaxRows 를 사용할 것.
+ */
+export function distributeWorkDays(workDays: number, monthDays: number = 31): number[] {
+  const arr = new Array<number>(31).fill(0);
+  if (workDays <= 0) return arr;
+  const step = monthDays / workDays;
+  for (let i = 0; i < workDays; i++) {
+    const day = Math.min(monthDays, Math.floor(i * step) + 1);
+    arr[day - 1] = 1.0;
+  }
+  return arr;
+}
+
 /* ────────── 1. 우리 데이터로부터 노임대장 빌드 ────────── */
 
 /**
@@ -84,18 +153,9 @@ export function buildLedgerFromWage(opts: {
   const mm = summary.month;
   const lastDay = new Date(yyyy, mm, 0).getDate(); // 해당 월의 마지막 일자
 
-  // 우리는 일자별 데이터를 직접 보관하지 않으므로 근무일을 등간격으로 분포
-  const distributeWorkDays = (workDays: number): number[] => {
-    const arr = new Array(31).fill(0);
-    if (workDays <= 0) return arr;
-    // 1일부터 lastDay 중에 workDays개를 균등 분포 (간단화)
-    const step = lastDay / workDays;
-    for (let i = 0; i < workDays; i++) {
-      const day = Math.min(lastDay, Math.floor(i * step) + 1);
-      arr[day - 1] = 1.0;
-    }
-    return arr;
-  };
+  // Phase Y3 — 일자별 공수는 실제 dailyTaxRows.workDate 기준으로 마킹.
+  //          (기존 distributeWorkDays 등간격 분포 제거)
+  void lastDay;
 
   const rows: LedgerRow[] = summary.rows.map((r, idx) => ({
     order: idx + 1,
@@ -104,7 +164,7 @@ export function buildLedgerFromWage(opts: {
     phone: '',
     address: '',
     trade: `미지정 | ${r.role} | 직영`,
-    dailyGongsu: distributeWorkDays(r.workDays),
+    dailyGongsu: buildDailyGongsuFromDailyTaxRows(r as unknown as WageRow),
     totalGongsu: r.workDays,
     dailyWage: r.dailyWage,
     totalWage: r.baseAmount,
@@ -144,7 +204,9 @@ export async function downloadLedgerXlsx(doc: LedgerDoc): Promise<void> {
   if (!res.ok) throw new Error('양식 파일을 찾을 수 없습니다.');
   const buf = await res.arrayBuffer();
 
-  const wb = new ExcelJS.Workbook();
+  const ExcelJSMod = (await import('exceljs')).default;
+
+  const wb = new ExcelJSMod.Workbook();
   await wb.xlsx.load(buf);
   const ws = wb.worksheets[0];
 
@@ -215,7 +277,7 @@ export async function downloadLedgerXlsx(doc: LedgerDoc): Promise<void> {
  * ExcelJS 셀에 값 안전하게 설정.
  * 셀의 기존 스타일·서식은 그대로 두고 .value만 갱신.
  */
-function setVal(ws: ExcelJS.Worksheet, addr: string, value: string | number) {
+function setVal(ws: ExcelJSType.Worksheet, addr: string, value: string | number) {
   if (value === null || value === undefined || value === '') return;
   const cell = ws.getCell(addr);
   cell.value = value;
@@ -244,6 +306,7 @@ function formatYmd(iso: string): string {
  */
 export async function parseLedgerFile(file: File): Promise<LedgerDoc> {
   const buf = await file.arrayBuffer();
+  const XLSX = await import('xlsx');
   const wb = XLSX.read(buf, { type: 'array' });
   const ws = wb.Sheets[wb.SheetNames[0]];
 
@@ -320,7 +383,7 @@ export async function parseLedgerFile(file: File): Promise<LedgerDoc> {
   };
 }
 
-function getCell(ws: XLSX.WorkSheet, addr: string): string | number | null {
+function getCell(ws: XLSXType.WorkSheet, addr: string): string | number | null {
   const cell = ws[addr];
   if (!cell) return null;
   return cell.v ?? null;

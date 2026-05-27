@@ -2,6 +2,7 @@ import type React from 'react';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
+import { MonthlyAttendancePanel } from '../components/legal/MonthlyAttendancePanel';
 import { WorkCloseHeader } from '../components/WorkCloseHeader';
 import { computeWorkCloseProgress } from '../utils/workCloseProgress';
 import { localDateStr, localYearMonth } from '../utils/dateLocal';
@@ -41,6 +42,8 @@ import {
   type SubVerifyChannel,
   type SubVerifyRequestRecord,
 } from '../utils/subVerifyRequest';
+import type { AttSortKey, UploadFormat, SubVerifyRequestModalState } from './attendance/types';
+import { AuthReasonPicker } from './attendance/components/AuthReasonPicker';
 import {
   parseLedgerFile,
   appendToArchive,
@@ -50,6 +53,20 @@ import './AttendancePage.css';
 
 import { MacSelect } from '../components/MacSelect';
 import { MacDatePicker } from '../components/MacDatePicker';
+import {
+  krw,
+  cellClass,
+  shortSpecialty,
+  methodLabel,
+  checkOutMethodLabel,
+  statusBadge,
+  mergeMonths,
+  mergeTodays,
+} from './attendance/utils/attendanceUtils';
+import { GeofenceBadge } from './attendance/components/GeofenceBadge';
+import { KCard } from './attendance/components/KCard';
+import { AttSortTh } from './attendance/components/AttSortTh';
+import { AuditLogPanel } from './attendance/components/AuditLogPanel';
 /**
  * 출퇴근 현황
  *
@@ -1193,6 +1210,7 @@ export function AttendancePage({ forceTab }: { forceTab?: 'auth' | 'daily' } = {
         })()}
       />
 
+      <MonthlyAttendancePanel siteId={siteId} yearMonth={yearMonth} />
 
       {attTab === 'auth' && (() => {
         const foremanById = new Map(foremen.map((f) => [f.id, f]));
@@ -4581,72 +4599,7 @@ export function AttendancePage({ forceTab }: { forceTab?: 'auth' | 'daily' } = {
   );
 }
 
-function cellClass(r: AttendanceRecord | undefined): string {
-  if (!r) return '';
-  if (r.status === 'ABSENT') return 'att-cell--absent';
-  // 입력 방식·공수 값과 무관하게 단일 톤 (수동/얼굴은 셀 내 라벨로 구분)
-  return 'att-cell--filled';
-}
-
-/* ───────── 좌측: 팀원 요약 리스트 (이름·직종·공수·일수) ───────── */
-
-/* ───────── 다중 현장 합계 머지 ───────── */
-
-function mergeMonths(
-  months: AttendanceMonth[],
-  yearMonth: string,
-): AttendanceMonth | null {
-  if (months.length === 0) return null;
-  if (months.length === 1) return months[0];
-  const [yStr, mStr] = yearMonth.split('-');
-  const year = Number(yStr);
-  const month = Number(mStr);
-  // dates 는 같은 yearMonth 면 동일하므로 첫 번째 것 사용
-  const dates = months[0].dates;
-  const rows = months.flatMap((m) => m.rows);
-  const summary = {
-    totalMembers: 0,
-    totalGongsu: 0,
-    totalPay: 0,
-    faceCount: 0,
-    manualCount: 0,
-    absentCount: 0,
-    lateCount: 0,
-    earlyCount: 0,
-  };
-  for (const m of months) {
-    summary.totalMembers += m.summary.totalMembers;
-    summary.totalGongsu += m.summary.totalGongsu;
-    summary.totalPay += m.summary.totalPay;
-    summary.faceCount += m.summary.faceCount;
-    summary.manualCount += m.summary.manualCount;
-    summary.absentCount += m.summary.absentCount;
-    summary.lateCount += m.summary.lateCount;
-    summary.earlyCount += m.summary.earlyCount;
-  }
-  return { year, month, siteId: 'ALL', dates, rows, summary };
-}
-
-function mergeTodays(todays: TodayAttendance[]): TodayAttendance | null {
-  if (todays.length === 0) return null;
-  if (todays.length === 1) return todays[0];
-  const members = todays.flatMap((t) => t.members);
-  const summary = {
-    totalCount: 0, beforeCount: 0, workingCount: 0, doneCount: 0,
-  };
-  for (const t of todays) {
-    summary.totalCount += t.summary.totalCount;
-    summary.beforeCount += t.summary.beforeCount;
-    summary.workingCount += t.summary.workingCount;
-    summary.doneCount += t.summary.doneCount;
-  }
-  return {
-    siteId: 'ALL',
-    date: todays[0].date,
-    members,
-    summary,
-  };
-}
+/* cellClass, mergeMonths, mergeTodays → src/pages/attendance/utils/attendanceUtils.ts (V3) */
 
 /* ───────── 년월 선택기 (네이티브 month input 대체) ───────── */
 
@@ -4740,11 +4693,7 @@ function YearMonthPicker({
  *  - 행 클릭 → 그 사람·그 날 의 공수 직접 입력 다이얼로그 직행
  */
 /** specialty 문자열에서 식별용 두 글자 추출 — "철근·콘크리트공사" → "철근" */
-function shortSpecialty(s: string | undefined | null): string {
-  if (!s) return '하';
-  const clean = s.replace(/[·\s,()/]|제\d+종/g, '');
-  return clean.slice(0, 2) || '하';
-}
+/* shortSpecialty → src/pages/attendance/utils/attendanceUtils.ts (V3) */
 
 function DateAttendanceList({
   rows,
@@ -4942,59 +4891,6 @@ function DateAttendanceList({
  *  · LOW_ACCURACY → 📍 노랑 (GPS 오차범위 초과)
  *  · NO_LOCATION → ❓ 회색 (위치정보 미수집)
  */
-function GeofenceBadge({ rec }: { rec: AttendanceRecord }) {
-  const result = rec.geofenceResult;
-  if (!result || result === 'INSIDE') return null;
-  if (result === 'OUTSIDE') {
-    const dist = rec.distanceFromSiteM ? `${rec.distanceFromSiteM}m` : '반경 밖';
-    const acc = rec.checkInLocation?.accuracy;
-    return (
-      <Tooltip
-        tone="danger"
-        title="⚠ 현장 밖 출근 시도"
-        body={
-          <>
-            현장 좌표로부터 <strong>{dist}</strong> 떨어진 위치에서 인증 시도
-            {acc && <> · 정확도 ±{acc}m</>}
-          </>
-        }
-      >
-        <span className="att-day-list__geo att-day-list__geo--out" aria-label={`현장 밖 ${dist}`}>
-          ⚠
-        </span>
-      </Tooltip>
-    );
-  }
-  if (result === 'LOW_ACCURACY') {
-    const acc = rec.checkInLocation?.accuracy;
-    return (
-      <Tooltip
-        tone="warning"
-        title="📍 GPS 오차범위 초과"
-        body={
-          <>
-            측정 정확도{acc && <> ±{acc}m</>}로 위치 신뢰도가 낮습니다. 실내·터널·고층빌딩 영향 가능
-          </>
-        }
-      >
-        <span className="att-day-list__geo att-day-list__geo--low" aria-label="GPS 오차">
-          📍
-        </span>
-      </Tooltip>
-    );
-  }
-  return (
-    <Tooltip
-      tone="default"
-      title="❓ 위치정보 미수집"
-      body={<>위치 권한이 없거나 반장이 수동으로 처리한 출근입니다</>}
-    >
-      <span className="att-day-list__geo att-day-list__geo--none" aria-label="GPS 위치 미수집">
-        ❓
-      </span>
-    </Tooltip>
-  );
-}
 
 /**
  * 개인별 출력 모드의 좌측 리스트 — 전체 팀원 (ㄱㄴㄷ 정렬).
@@ -5133,7 +5029,6 @@ function EmptyMemberCalendar({
   );
 }
 
-type AttSortKey = 'name' | 'role' | 'gongsu' | 'days';
 
 function MemberSummaryList({
   rows,
@@ -5241,33 +5136,6 @@ function MemberSummaryList({
   );
 }
 
-function AttSortTh({
-  label, col, cur, dir, on, numeric,
-}: {
-  label: string;
-  col: AttSortKey;
-  cur: AttSortKey;
-  dir: 'asc' | 'desc';
-  on: (k: AttSortKey) => void;
-  numeric?: boolean;
-}) {
-  const active = cur === col;
-  return (
-    <th
-      className={
-        (numeric ? 'att-mlist__num ' : '') +
-        'att-mlist__sort' +
-        (active ? ' is-active' : '')
-      }
-      onClick={() => on(col)}
-    >
-      {label}
-      <span className="att-mlist__sort-ind" aria-hidden>
-        {active ? (dir === 'asc' ? '▲' : '▼') : '↕'}
-      </span>
-    </th>
-  );
-}
 
 /* ───────── 중앙: 선택 팀원의 달력 ───────── */
 
@@ -5716,61 +5584,6 @@ function MemberCalendar({
 /* ───────── 우측 사이드: 감사 로그 ───────── */
 
 /** AuditLogPanel — 부모 aside.att__col 가 카드 역할이라 내부엔 .att-audit (no card) 만 둠 */
-function AuditLogPanel({ audit }: { audit: AuditLogEntry[] }) {
-  function shortType(t: string): string {
-    if (t === 'MANUAL_CHECK_IN') return '출근';
-    if (t === 'MANUAL_CHECK_OUT') return '퇴근';
-    if (t === 'BULK_CHECK_OUT') return '일괄퇴근';
-    if (t === 'MANUAL_GONGSU') return '공수입력';
-    return '기타';
-  }
-  function typeCls(t: string): string {
-    if (t === 'BULK_CHECK_OUT') return 'bulk';
-    if (t === 'MANUAL_GONGSU') return 'gongsu';
-    return 'manual';
-  }
-  return (
-    <div className="att-audit">
-      <h3 className="att-audit__title">감사 로그</h3>
-      {audit.length === 0 ? (
-        <p className="att-audit__empty">최근 처리 기록이 없습니다.</p>
-      ) : (
-        <ul className="att-audit__list">
-          {audit.map((a) => {
-            const names = a.memberNames.join(', ') + (a.memberNames.length > 1 ? ` 외 ${a.memberNames.length - 1}명` : '');
-            return (
-              <li key={a.id} className="att-audit__item">
-                <div className="att-audit__top">
-                  <strong className="att-audit__name">
-                    {a.memberNames[0] ?? '-'}
-                    {a.memberNames.length > 1 && (
-                      <em className="att-audit__cnt"> · {a.memberNames.length}명</em>
-                    )}
-                  </strong>
-                  <span className={`att-audit__type att-audit__type--${typeCls(a.type)}`}>
-                    {shortType(a.type)}
-                  </span>
-                </div>
-                <p className="att-audit__bottom">
-                  <span className="att-audit__by">{a.performedBy}</span>
-                  <span className="att-audit__time">
-                    {new Date(a.performedAt).toLocaleString('ko-KR', {
-                      month: '2-digit',
-                      day: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </span>
-                </p>
-                {a.reason && <p className="att-audit__reason" title={names}>{a.reason}</p>}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
 
 /* ───────── 일괄 퇴근 다이얼로그 ───────── */
 
@@ -6118,45 +5931,7 @@ function RecordDetailPanel({ record: r, siteName }: { record: AttendanceRecord; 
   );
 }
 
-function methodLabel(
-  m: AttendanceRecord['checkInMethod'],
-  score: number | null,
-): string {
-  if (!m) return '';
-  if (m === 'FACE') {
-    return score != null
-      ? `인식률 ${Math.round(score * 100)}%`
-      : '얼굴인식';
-  }
-  return '관리자 수동보정';
-}
-
-/** 퇴근용 라벨 — 시각이 18시 이후이고 method 가 EXCEPTION 이거나 점수 null 이면 「자동퇴근」 */
-function checkOutMethodLabel(r: AttendanceRecord): string {
-  if (!r.checkOutMethod) return '';
-  if (r.checkOutMethod === 'FACE') {
-    return r.checkOutScore != null
-      ? `인식률 ${Math.round(r.checkOutScore * 100)}%`
-      : '얼굴인식';
-  }
-  // MANUAL — 18시 이후 자동 처리(EXCEPTION) 인지 시각으로 추정
-  if (r.checkOutAt) {
-    const hh = new Date(r.checkOutAt).getHours();
-    if (hh >= 18 && r.checkOutScore == null) return '자동퇴근';
-  }
-  return '관리자 수동보정';
-}
-
-function statusBadge(r: AttendanceRecord): { kind: string; label: string } {
-  if (r.status === 'ABSENT') return { kind: 'absent', label: '' };
-  if (r.checkInMethod === 'MANUAL' || r.checkOutMethod === 'MANUAL') {
-    return { kind: 'manual', label: '수동 처리' };
-  }
-  if (r.status === 'LATE') return { kind: 'late', label: '지각' };
-  if (r.status === 'EARLY') return { kind: 'early', label: '조퇴' };
-  if (!r.checkOutAt) return { kind: 'working', label: '근무 중' };
-  return { kind: 'ok', label: '정상' };
-}
+/* methodLabel, checkOutMethodLabel, statusBadge → src/pages/attendance/utils/attendanceUtils.ts (V3) */
 
 function SetGongsuDialog({
   open,
@@ -6540,50 +6315,11 @@ function BulkGongsuDialog({
 
 /* ───────── 공용 ───────── */
 
-function KCard({
-  label,
-  value,
-  sub,
-  color,
-  strong,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  color?: string;
-  strong?: boolean;
-}) {
-  return (
-    <div className={`att-kcard card ${strong ? 'is-strong' : ''}`}>
-      <div className="att-kcard__main">
-        <p className="att-kcard__label">{label}</p>
-        <p className="att-kcard__value" style={color ? { color } : undefined}>
-          {value}
-        </p>
-      </div>
-      {sub && <p className="att-kcard__sub">{sub}</p>}
-    </div>
-  );
-}
 
 
-function krw(n: number) {
-  return n.toLocaleString() + '원';
-}
+/* krw → src/pages/attendance/utils/attendanceUtils.ts (V3) */
 
 /* ───────── 출역확인 요청 모달 ───────── */
-
-interface SubVerifyRequestModalState {
-  siteCompanyId: string;
-  companyName: string;
-  siteName: string;
-  memberCount: number;
-  todayTotal: number;
-  todayWorking: number;
-  message: string;
-  channels: SubVerifyChannel[];
-  sending: boolean;
-}
 
 function SubVerifyRequestModal({
   state,
@@ -6781,7 +6517,6 @@ function SubVerifyRequestModal({
 
 /* ───────── 엑셀 업로드 모달 — 양식 다운로드 + 입력양식/노임대장 업로드 ───────── */
 
-type UploadFormat = 'INPUT' | 'LEDGER';
 
 function ExcelUploadModal({
   site,
@@ -6828,6 +6563,12 @@ function ExcelUploadModal({
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Phase BB4 — xlsx 파일 크기 제한 10MB (Prototype Pollution / ReDoS 완화)
+    if (file.size > 10 * 1024 * 1024) {
+      alert('파일 크기 10MB 초과 — 거부 (xlsx 보안 정책)');
+      if (e.target) e.target.value = '';
+      return;
+    }
     setBusy(true);
     setResultMsg(null);
     setErrorMsg(null);
@@ -6932,6 +6673,9 @@ function ExcelUploadModal({
 
         {/* 파일 업로드 영역 */}
         <h4 className="att-excel__sec-title">파일 업로드</h4>
+        <p style={{padding:'6px 10px',background:'#FFF3CD',border:'1px solid #FFEEBA',borderRadius:6,color:'#856404',fontSize:12,marginBottom:8}}>
+          ⚠ 목업/시연용 — 사용자 업로드 xlsx 파싱은 브라우저에서 직접 처리됩니다. 실서비스에서는 서버 처리로 전환됩니다.
+        </p>
         <label
           className={'att-excel__drop' + (busy ? ' is-busy' : '')}
           htmlFor="att-excel-file-input"
@@ -7095,108 +6839,6 @@ function QuickAddMemberDialog({
   );
 }
 
-function AuthReasonPicker({
-  memberName,
-  actionLabel,
-  action,
-  reasonRequired,
-  onClose,
-  onConfirm,
-}: {
-  memberName: string;
-  actionLabel: string;
-  action: 'approved' | 'rejected' | 'confirmed';
-  reasonRequired: boolean;
-  onClose: () => void;
-  onConfirm: (reason: string) => void;
-}) {
-  const PRESETS_APPROVED = [
-    '현장 확인 완료',
-    '반장 확인 완료',
-    '근로자 확인 완료',
-    '사진·CCTV 확인 완료',
-  ];
-  const PRESETS_REJECTED = [
-    '본인 확인 불가',
-    '출근시간 불일치',
-    '현장 외 위치',
-    '중복 출근',
-  ];
-  const PRESETS_CONFIRMED = [
-    '현장 확인 완료',
-    '반장 확인 완료',
-    '근로자 확인 완료',
-    '추가 검토 완료',
-  ];
-  const presets = action === 'approved' ? PRESETS_APPROVED
-                : action === 'rejected' ? PRESETS_REJECTED
-                : PRESETS_CONFIRMED;
-
-  // 첫 프리셋을 기본 선택 — reasonRequired 인 케이스(수동/얼굴실패)에서도 사용자가
-  // 한 번만 클릭하면 즉시 승인 가능하도록. 다른 프리셋이나 「기타」 선택 시 갱신.
-  const [picked, setPicked] = useState<string | null>(presets[0] ?? null);
-  const [other, setOther] = useState<string>('');
-  const isOther = picked === '__other__';
-  const finalReason = isOther ? other.trim() : (picked ?? '');
-  const canSubmit = !reasonRequired || finalReason.length > 0;
-
-  const tone = action === 'rejected' ? 'danger' : 'ok';
-
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title={`${memberName} · ${actionLabel}`}
-      subtitle={reasonRequired ? '사유를 선택하거나 직접 입력해주세요 (감사 로그에 기록됩니다)' : '사유 부가 (선택 안해도 바로 처리 가능)'}
-      width={520}
-      footer={
-        <>
-          <button type="button" className="att__btn att__btn--ghost" onClick={onClose}>취소</button>
-          <button
-            type="button"
-            className={'att__btn ' + (tone === 'danger' ? 'att__btn--danger' : 'att__btn--primary')}
-            onClick={() => onConfirm(finalReason)}
-            disabled={!canSubmit}
-          >
-            {actionLabel}
-          </button>
-        </>
-      }
-    >
-      <div className="att-reason">
-        <div className="att-reason__chips">
-          {presets.map((p) => (
-            <button
-              key={p}
-              type="button"
-              className={'att-reason__chip' + (picked === p ? ' is-active' : '')}
-              onClick={() => setPicked(p)}
-            >
-              {p}
-            </button>
-          ))}
-          <button
-            type="button"
-            className={'att-reason__chip att-reason__chip--other' + (isOther ? ' is-active' : '')}
-            onClick={() => setPicked('__other__')}
-          >
-            기타 (직접 입력)
-          </button>
-        </div>
-        {isOther && (
-          <textarea
-            className="att-reason__textarea"
-            rows={3}
-            placeholder="사유를 입력해주세요"
-            value={other}
-            onChange={(e) => setOther(e.target.value)}
-            autoFocus
-          />
-        )}
-      </div>
-    </Modal>
-  );
-}
 
 /* ───────── (DEPRECATED) 출역 추가 다이얼로그 ─────────
  *  + 출역 추가 클릭 시 SetGongsuDialog (수동 공수 처리) 로 통일되어 더 이상 호출되지 않음.

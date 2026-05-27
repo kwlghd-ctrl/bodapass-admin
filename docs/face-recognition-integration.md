@@ -1,190 +1,229 @@
-# 스마트폰 얼굴인식 출퇴근 — 연동 가이드
+# 스마트폰 얼굴인식 출퇴근 — 연동 가이드 (v2)
 
-**대상 시스템:** 보다패스 작업자용 모바일 앱 (작업자 본인 폰에 설치)
+**대상 시스템:** 보다패스 작업자용 모바일 앱 / 키오스크 (작업자 본인 폰 또는 현장 키오스크)
 **연동 시점:** 본 admin 웹과 Mock 백엔드는 이미 동일 contract 로 동작.
 실서버 도입 시 동일 endpoint 만 구현하면 화면 코드 변경 없이 즉시 작동.
+
+> **중요:** 본 문서는 v2 API (서버-권위 판정 구조) 기준입니다. 이전 v1 (앱이 memberId/matchScore/liveness 결정) 은 deprecated.
+
+---
+
+## 핵심 원칙 — 「서버 권위」
+
+**앱은 판정하지 않는다.** 앱은 단지 「얼굴 이미지 + 위치 + 기기 정보」 를 서버에 보낼 뿐, 다음은 모두 서버가 판정한다:
+
+- 어느 워커인지 (얼굴 매칭 → employmentId)
+- 매칭 점수 (matchScore)
+- 라이브니스 (사진/영상 위변조 차단)
+- 지오펜스 (현장 좌표와 비교)
+- 출퇴근 가능 여부 (마감 상태·중복출근 등)
+
+이 구조 덕분에 클라이언트(앱)가 위변조되더라도 부정 출근을 막을 수 있다.
 
 ---
 
 ## 1. 등록 단계 (1회)
 
-작업자가 시스템에 가입할 때 실행하는 사전 작업.
+작업자가 시스템에 가입할 때 1회 실행.
 
 ```
-┌────────────────┐     ┌──────────────────┐     ┌────────────┐
-│ 모바일 앱       │ →  │ 얼굴 임베딩 추출 │ →  │ 서버 저장  │
-│ (선명한 정면 │     │ (on-device 또는 │     │ Worker.    │
-│  사진 1장)     │     │  서버 측)        │     │ faceVector │
-└────────────────┘     └──────────────────┘     └────────────┘
+┌────────────────┐     ┌──────────────────┐     ┌────────────────────┐
+│ 모바일 앱       │ →  │ POST             │ →  │ 서버 측 임베딩 추출 │
+│ (정면 얼굴      │     │ /v2/workers/     │     │ + faceTemplateId   │
+│  사진 1장)      │     │   :id/face       │     │ 발급                │
+└────────────────┘     └──────────────────┘     └────────────────────┘
 ```
 
-- 얼굴 임베딩(512차원 float vector)은 서버에 저장.
-- `Worker.faceVerified = true` 로 변경되면 Tier 1 / Tier 2 자격 부여.
-- 사진 자체는 서버에 보관 X (개인정보보호 차원, 임베딩만).
+요청:
+```json
+POST /v2/workers/{workerId}/face
+{
+  "faceImageId": "img-2026-05-11-abc123"
+}
+```
+
+응답: `Worker` (faceVerified=true 로 갱신)
+
+- 이미지는 서버가 처리 — 앱은 원본 이미지를 보관·전송하지 않음 (uploadImage endpoint 로 별도 업로드)
+- 얼굴 임베딩(512-d 또는 모델별)은 서버 DB 에 암호화 저장
+- `Worker.faceVerified = true` 로 바뀌면 trustTier 1/2 자격 부여
+- 원본 사진은 임베딩 추출 후 즉시 폐기 (개인정보 최소 수집 원칙)
 
 ---
 
-## 2. 출근 흐름 (매일)
-
-작업자가 현장 도착 → 앱 실행 → 본인 얼굴 촬영 → 출근 확정.
+## 2. 매일 출근 흐름
 
 ```
-모바일 앱:
-  1. 카메라 ON + 라이브니스 검증 (눈깜빡임/머리회전)
-  2. 추출된 임베딩으로 on-device 매칭 (서버 등록 벡터와 코사인 유사도)
-  3. 매칭 성공 + GPS 획득 + 서버 시각 동기화
-  4. POST /attendance/face-checkin 전송 ↓
+모바일 앱 / 키오스크:
+  1. 카메라 ON
+  2. 얼굴 촬영 + GPS 위치 + 기기 ID 수집
+  3. 이미지를 서버에 업로드 → faceImageId 발급
+  4. POST /v2/attendance/face-checkin 호출 ↓
 
 서버:
-  1. memberId 검증 — 등록된 워커?
-  2. liveness === 'PASSED' 확인
-  3. matchScore >= 0.85 확인
-  4. 시각 ±30초 동기화 검증
-  5. GPS 가 site.geofence 반경 내인지 확인
-  6. 그 날 출퇴근 마감 안 됐는지 확인
-  7. AttendanceRecord 생성 (checkInMethod='FACE')
-  8. AuditLog 'MANUAL_CHECK_IN' 기록 (시스템 자동)
-  9. 응답 200 + record + 「인식률 N%」 메시지
+  1. 얼굴 매칭 — 현장 활성 워커들의 임베딩 풀과 비교 (cosine similarity)
+     · 최고점 워커 선정 + matchScore 계산
+     · matchScore < 0.7 → REJECTED: NO_FACE_MATCH
+  2. 라이브니스 검증 (위변조 차단)
+     · 단일 이미지 PAD (Presentation Attack Detection)
+     · 실패 → REJECTED: LIVENESS_FAILED
+  3. 지오펜스 판정 — site.geofence 와 거리 계산
+     · INSIDE / OUTSIDE / LOW_ACCURACY / NO_LOCATION
+     · OUTSIDE → REJECTED: OUTSIDE_GEOFENCE
+  4. 중복 출근 체크
+     · 이미 오늘 checkInAt 있으면 → REJECTED: DUPLICATE_CHECKIN
+  5. 현장 마감 상태 체크
+     · CLOSED → REJECTED: SITE_CLOSED
+  6. AttendanceRecord 생성
+     · employmentId, matchScore, livenessCheckIn, geofenceResult 모두 서버 기록
+     · auditLog 자동 추가
+
+응답: FaceCheckResponse
 ```
-
-### 요청 스키마 (`FaceCheckInRequest`)
-
-```typescript
-POST /attendance/face-checkin
-Content-Type: application/json
-Authorization: Bearer <user-token>
-
-{
-  "memberId": "M-001234",
-  "siteId":   "S-2026-1043",
-  "capturedAt": "2026-05-05T07:25:00.123Z",
-  "matchScore": 0.97,
-  "liveness": "PASSED",         // 'PASSED' | 'FAILED' | 'SKIPPED'
-  "location": {
-    "lat": 37.4979,
-    "lng": 127.0276,
-    "accuracy": 8.5,            // m
-    "capturedAt": "2026-05-05T07:24:55.000Z"
-  },
-  "device": {
-    "deviceId": "uuid-...",
-    "os": "iOS 17.4",
-    "model": "iPhone 15 Pro",
-    "appVersion": "1.0.0"
-  },
-  "embedding": [/* 512 floats — 옵션 */]
-}
-```
-
-### 응답 (정상)
-
-```typescript
-HTTP/1.1 200 OK
-
-{
-  "record": {
-    "id": "R-M-001234-2026-05-05",
-    "memberId": "M-001234",
-    "memberName": "김철수",
-    "checkInAt": "2026-05-05T07:25:00.123Z",
-    "checkInMethod": "FACE",
-    "checkInScore": 0.97,
-    "checkInLocation": { ... },
-    "geofenceResult": "INSIDE",
-    "distanceFromSiteM": 12,
-    ...
-  },
-  "processedAt": "2026-05-05T07:25:01.456Z",
-  "message": "얼굴인식 출근 완료 (인식률 97%)"
-}
-```
-
-### 응답 (거부)
-
-```typescript
-HTTP/1.1 422 Unprocessable Entity
-
-{
-  "code": "OUT_OF_GEOFENCE",
-  "message": "현장 반경 밖 — 거리 350m",
-  "detail": { "distance": 350, "radius": 100 }
-}
-```
-
-거부 코드:
-- `NO_MATCH` — 임베딩 매칭 실패
-- `LOW_SCORE` — 점수 < 임계값 (0.85)
-- `LIVENESS_FAILED` — 사진·영상 위변조 의심
-- `OUT_OF_GEOFENCE` — 현장 반경 밖
-- `STALE_TIMESTAMP` — 시각 ±30초 초과
-- `DEVICE_BLOCKED` — 차단된 디바이스
-- `MEMBER_NOT_FOUND` — 등록 안 된 워커
-- `SITE_CLOSED` — 그 날 출퇴근 마감
 
 ---
 
-## 3. 퇴근 흐름
+## 3. API 계약
 
-`POST /attendance/face-checkout` — 출근과 동일 스키마.
+### Request — `POST /v2/attendance/face-checkin`
 
-서버 처리:
-1. 출근 기록 존재 확인 (`record.checkInAt` 있어야 함)
-2. 검증 5종 (출근과 동일)
-3. 공수 자동 계산 — `calcGongsu(checkInAt, checkOutAt)`
-4. `record.payAmount = dailyWage × gongsu`
-5. AuditLog 기록
+```typescript
+interface FaceCheckRequest {
+  siteId: string;
+  faceImageId: string;          // 서버에 업로드된 이미지 ID
+
+  location?: {                  // GPS — 옵션 (없으면 NO_LOCATION 처리)
+    lat: number;
+    lng: number;
+    accuracy: number;           // m
+    capturedAt: string;         // ISO
+  };
+
+  device: {
+    kind: string;               // 'KIOSK' | 'FOREMAN_MOBILE' | 'SITE_TABLET' 등
+    deviceId: string;
+    appVersion?: string;
+  };
+
+  clientTime: string;           // ISO — 서버가 자체 시각과 비교 (drift 감지)
+}
+```
+
+**중요:** Request 에는 `memberId / matchScore / liveness` 가 **없다**. 앱이 그 결정을 못 한다.
+
+### Response — `FaceCheckResponse`
+
+```typescript
+type FaceCheckResponse =
+  | { status: 'OK'; record: AttendanceRecord }
+  | {
+      status: 'REJECTED';
+      reason:
+        | 'NO_FACE_MATCH'
+        | 'LIVENESS_FAILED'
+        | 'OUTSIDE_GEOFENCE'
+        | 'DUPLICATE_CHECKIN'
+        | 'NOT_EMPLOYED'
+        | 'SITE_CLOSED'
+        | 'OTHER';
+      detail?: string;
+    }
+  | {
+      status: 'PENDING_REVIEW';
+      recordId: string;
+      reason: string;            // 라이브니스 애매 / 매칭 0.7~0.85
+      detail?: string;
+    };
+```
+
+- `OK`: 정상 출근. 앱은 record 의 employmentId·checkInAt·gongsu 등 표시
+- `REJECTED`: 거부됨. 앱은 reason 코드로 UX 결정 (재시도 / 반장에게 알림 / 수동 처리 요청)
+- `PENDING_REVIEW`: 보류 — 본사 검토 후 확정/취소 결정. 앱은 「곧 확정됩니다」 메시지 노출
 
 ---
 
-## 4. 화면 노출
+## 4. 퇴근 흐름
 
-본 admin 화면(AttendancePage)은 이미 모든 표시 로직을 갖추고 있음.
-모바일 얼굴인식이 도입되면 **별도 코드 변경 없이** 같은 캘린더에 자동 노출.
+`POST /v2/attendance/face-checkout` — 요청·응답 shape 동일.
 
-| 화면 위치 | 표시 내용 |
+서버 추가 로직:
+- 출근 기록 존재 확인 (없으면 REJECTED: OTHER)
+- workedMinutes / gongsu / payAmount 자동 계산 (`utils/gongsu.calcGongsu`)
+- 18시 미퇴근자는 시스템이 별도 cron 으로 일괄 처리 (`/v2/attendance/bulk-check-out`)
+
+---
+
+## 5. 키오스크 vs 본인 모바일
+
+| 항목 | 키오스크 (현장 입구 고정 단말) | 본인 모바일 (반장 앱·작업자 앱) |
+|---|---|---|
+| `device.kind` | `'KIOSK'` | `'WORKER_MOBILE'` / `'FOREMAN_MOBILE'` |
+| 화면 | 「얼굴 인식 중...」 → 결과 표시 | 동일 |
+| 위치 | 현장 고정 → location 생략 가능 | 필수 — GPS 권한 필요 |
+| 라이브니스 | 권장 | 필수 (개인 단말은 위변조 위험 더 높음) |
+| 인증 | 키오스크 자체 토큰 | 사용자 JWT |
+
+---
+
+## 6. 보안 / 개인정보
+
+### 클라이언트 측
+
+- 얼굴 사진 원본 — 메모리에서만 처리, 디스크 미저장
+- 임베딩 추출 — 서버에서만 수행 (on-device 추출은 금지)
+- faceImageId 는 일회용 — 사용 후 5분 이내 만료 (uploadImage endpoint 에서 발급한 short-lived presigned URL 사용)
+
+### 서버 측
+
+- 얼굴 임베딩 — AES-256 + KMS 키 분리 저장
+- 1년 후 자동 백업 → 5년 후 자동 삭제 (개인정보 보존기간 정책)
+- 모든 API 호출 audit log 기록 (성공·실패 무관)
+
+### 동의
+
+작업자 가입 시 「전자동의서 PART 2 — 얼굴 등 생체정보 처리 동의」 명시적 동의 필수.
+동의 철회 시 임베딩 삭제 + 얼굴인증 모드 비활성화 (수동 출퇴근만 가능).
+
+---
+
+## 7. 에러 처리 (앱 UX)
+
+| reason | 사용자 메시지 | 권장 액션 |
+|---|---|---|
+| `NO_FACE_MATCH` | 「얼굴이 등록된 워커와 일치하지 않습니다」 | 재시도 (3회 실패 시 반장 호출) |
+| `LIVENESS_FAILED` | 「실제 얼굴인지 확인되지 않습니다」 | 모자·마스크 제거 후 재촬영 |
+| `OUTSIDE_GEOFENCE` | 「현장 반경 밖입니다 — {거리}m」 | 현장 입구로 이동 후 재시도 |
+| `DUPLICATE_CHECKIN` | 「오늘 이미 출근하셨습니다」 | 출근 상태 표시 |
+| `NOT_EMPLOYED` | 「이 현장에 등록된 워커가 아닙니다」 | 반장에게 등록 요청 |
+| `SITE_CLOSED` | 「현장이 마감되어 출근 처리 불가」 | 본사에 문의 |
+| `PENDING_REVIEW` | 「확정 대기 중 — 본사 검토 후 알림드립니다」 | 푸시 알림 수신 후 확인 |
+
+---
+
+## 8. 로컬 시연 (Mock)
+
+`VITE_USE_MOCK=true` 상태에서:
+- 임의 faceImageId 로 호출하면 mockBackend 가 결정적 해시로 워커를 선정
+- matchScore: 0.85~0.99 랜덤
+- liveness: 95% PASSED
+- 지오펜스: site.geofence 가 있으면 실제 거리 계산
+
+실서버 전환 시 mockBackend 제거 + `VITE_USE_MOCK=false` 만 변경.
+
+---
+
+## 9. v1 → v2 마이그레이션 (이미 적용됨)
+
+| v1 (deprecated) | v2 (현재) |
 |---|---|
-| 일자별 출력 시간 칩 | `07:25` 파란 칩 (FACE) — hover 툴팁 「인식률 97% · 07:25」 |
-| 캘린더 셀 | `1.0` 공수 + 얼굴 매칭 점수가 95% 미만이면 회색 강조 |
-| 수동 공수 처리 모달 | 「✓ 자동 얼굴인식 으로 기록된 출역입니다. 보정하시겠습니까?」 (파란 info 박스) |
-| 출/퇴근 라벨 | 「인식률 N%」 (출근), 「인식률 N%」 또는 18시 이후 + score null 이면 「자동퇴근」 (퇴근) |
-| 지오펜스 뱃지 | `OUTSIDE` / `LOW_ACCURACY` / `NO_LOCATION` 시 ⚠ / 📍 / ❓ 아이콘 |
+| 앱이 memberId 전송 | 서버가 얼굴 매칭 후 employmentId 결정 |
+| 앱이 matchScore 전송 | 서버가 cosine similarity 계산 |
+| 앱이 liveness 결과 전송 | 서버가 PAD 모델로 판정 |
+| 앱이 distanceFromSiteM 계산 | 서버가 haversine 으로 계산 |
+| 단일 status 응답 | OK / REJECTED(reason) / PENDING_REVIEW 3-state |
 
 ---
 
-## 5. 보안·감사
+> **연락처**: 백엔드 엔지니어가 본 endpoint 를 구현할 때, mockBackend.ts 의 `handleFaceCheck` 함수를 참조하면 동일 contract 를 보장할 수 있습니다.
 
-### 5.1 도용 방지
-
-| 위협 | 차단 메커니즘 |
-|---|---|
-| 사진 들이대기 | 라이브니스 — 눈깜빡임·고개돌림 (`liveness === 'PASSED'` 필수) |
-| 다른 사람 폰 사용 | `deviceId` 추적 + 매월 1회 디바이스 등록 검증 |
-| 시각 조작 | 클라이언트 시각 ±30초 검증 (`STALE_TIMESTAMP`) |
-| 현장 밖 인증 | GPS 지오펜스 검증 (`OUT_OF_GEOFENCE`) |
-| 임베딩 도용 | 매 인증 시 라이브니스 통과 후의 임베딩만 인정 (저장 X) |
-
-### 5.2 감사 로그
-
-모든 face-checkin/out 호출은 자동으로 `AuditLog` 에 기록됨:
-
-```typescript
-{
-  type: 'MANUAL_CHECK_IN',  // 코드는 manual 이지만 reason 에 [얼굴인식 출근] prefix
-  memberIds: ['M-001234'],
-  memberNames: ['김철수'],
-  reason: '[얼굴인식 출근] iPhone 15 Pro · 점수 97%',
-  performedBy: '시스템(FACE)',
-  performedAt: '2026-05-05T07:25:01.456Z'
-}
-```
-
-운영자는 출퇴근 페이지의 「감사 로그」 패널에서 시스템 처리·수동 처리·도용 시도를 한눈에 확인 가능.
-
----
-
-## 6. 향후 확장 포인트
-
-- **임베딩 매칭은 온디바이스로** — 서버에 임베딩 저장은 1회 등록 시만, 매 인증 시엔 클라이언트가 자체 매칭 후 결과만 전송 (개인정보보호 강화)
-- **다인 매칭 거부** — 1인 1폰 강제, 같은 deviceId 가 여러 memberId 와 매칭되면 차단
-- **터널·실내 GPS 약함** — `LOW_ACCURACY` 일 때 비콘·WiFi SSID 보조 검증 옵션
-- **퇴근 자동 처리** — 18:00 + 출근 후 8시간 경과 시 시스템이 자동 `MANUAL` 퇴근 등록 (현재 mock 시드에서 이미 시뮬레이션 중)
+작성: 2026-05-12 (v2)

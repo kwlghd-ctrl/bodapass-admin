@@ -23,6 +23,7 @@ import { getErrorMessage } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPhone } from '../utils/phone';
 import { makeCompanyCode, formatBizNo as formatBizNoBase } from '../utils/companyCode';
+import { resolveSeveranceFundDaily, loadFundSetting } from '../utils/severance';
 import './SiteListPage.css';
 
 import { MacSelect } from '../components/MacSelect';
@@ -457,6 +458,22 @@ export function SiteListPage() {
                           </span>
                           <span className="sl-row__contract-sep">·</span>
                           <strong className="sl-row__contract-amt">{krwShort(s.contractAmount)}</strong>
+                          {(() => {
+                            // Phase O9 — 사이트별 퇴직공제부금 일액 라벨
+                            const dec = resolveSeveranceFundDaily({
+                              site: { bidNoticeDate: s.bidNoticeDate, contractDate: s.contractDate, severanceFundMode: s.severanceFundMode, severanceFundCustomAmount: s.severanceFundCustomAmount },
+                              globalSetting: loadFundSetting(),
+                            });
+                            return (
+                              <span
+                                className="sl-row__fund-daily"
+                                title={`일액 결정: ${dec.source} · ${dec.policy}${dec.warning ? ` · ${dec.warning}` : ''}`}
+                                style={{ marginLeft: 8, fontSize: 11, color: '#8e8e93' }}
+                              >
+                                일액 {dec.fundDaily.toLocaleString()}원
+                              </span>
+                            );
+                          })()}
                           {s.scale === 'SMALL' && (
                             <span className="sl-tag-small" title="소규모 현장">소규모</span>
                           )}

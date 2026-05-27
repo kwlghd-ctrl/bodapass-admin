@@ -31,16 +31,17 @@ export function useAuth() {
   });
 
   useEffect(() => {
-    if (!user && tokenStore.getAccess()) {
+    // Cookie 기반 인증에서는 tokenStore.getAccess() 가 비어있어도
+    // cookie 가 살아있으면 /auth/me 호출이 성공할 수 있다.
+    // user 가 없으면 항상 한 번 시도 → 실패하면 인터셉터가 /login 으로.
+    if (!user) {
       authApi
         .me()
         .then(setUser)
         .catch(() => {
-          /* 무시 — 401이면 인터셉터가 /login으로 떨궈줌 */
+          /* 무시 — 401 이면 인터셉터가 /login 으로 떨궈줌 */
         });
     } else if (
-      user &&
-      tokenStore.getAccess() &&
       user.assignedSiteId === undefined &&
       user.role !== 'OWNER'
     ) {
@@ -48,9 +49,7 @@ export function useAuth() {
       authApi
         .me()
         .then(setUser)
-        .catch(() => {
-          /* 무시 */
-        });
+        .catch(() => { /* 무시 */ });
     }
   }, [user]);
 
@@ -61,7 +60,13 @@ export function useAuth() {
 
   const login = useCallback(async (req: LoginRequest) => {
     const res = await authApi.login(req);
-    tokenStore.set(res.accessToken, res.refreshToken);
+    // Cookie 기반 인증에서는 accessToken/refreshToken 이 cookie 로 자동 발급되어
+    // body 가 비어있을 수 있다. tokenStore 는 mock/legacy 호환만 — 있으면 저장.
+    if (res.accessToken && res.refreshToken) {
+      tokenStore.set(res.accessToken, res.refreshToken);
+    } else if (res.accessToken) {
+      tokenStore.set(res.accessToken, ''); // refresh 는 cookie 에 있음
+    }
     setUser(res.user);
     return res.user;
   }, []);

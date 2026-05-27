@@ -47,6 +47,37 @@ export interface InsuranceFlags {
   accident: boolean;
 }
 
+/**
+ * @deprecated Phase 4 마이그레이션 대상.
+ *
+ * TeamMember 는 「Worker + Employment 1건」 의 합쳐진 legacy view 다.
+ * 신규 코드는 다음 타입들을 사용:
+ *   · 사람 정보(이름·연락처·신분증·계좌·얼굴) → import { Worker } from './worker.types'
+ *   · 채용 정보(현장·일당·직종·반장 배정·비과세) → import { Employment } from './employment.types'
+ *   · 화면 표시용 합쳐진 뷰                    → import { EmploymentView } from './employment.types'
+ *
+ * 마이그레이션 가이드:
+ *   memberId           → workerId 또는 employmentId (도메인에 따라)
+ *   member.siteId      → employment.siteCompanyId / employmentView.siteId
+ *   member.dailyWage   → employment.dailyWage
+ *   member.role        → employment.trade
+ *   member.foremanId   → employment.foremanEmploymentId
+ *   member.joinedAt    → employment.startDate
+ *   member.leftAt      → employment.endDate
+ *   member.insurance   → employment.insurance
+ *   member.nontaxable  → employment.nontaxable
+ *   member.idType ... bankName → worker.idType ... bankName
+ *   member.trustTier   → worker.trustTier (또는 employment.identityTier 스냅샷)
+ *   member.workerCode  → worker.workerCode
+ *
+ * 신규 API:
+ *   workerApi  (워커 마스터)        — /workers
+ *   employmentApi (채용 관계)        — /employments, /employments/views
+ *   companyApi, siteCompanyApi      — 사업자·현장×회사 관계
+ *   attendanceV2Api                  — employmentId 기반 출퇴근
+ *   closeStatusApi                   — 마감 상태 머신
+ *   auditLogApi                      — 감사 로그
+ */
 export interface TeamMember {
   id: string;
   name: string;
@@ -62,11 +93,21 @@ export interface TeamMember {
   dailyWage: number;
   idType: IdType;
   idNumberMasked: string;
-  /** 평문 주민등록번호 (사회보험·노임대장 처리 권한이 있을 때 서버에서 함께 반환) */
+  /**
+   * 평문 주민등록번호 (사회보험·노임대장 처리 권한이 있을 때 서버에서 함께 반환).
+   *
+   * @deprecated 신규 V2 화면에서 직접 참조 금지. 대신 `workerApi.getSensitive(workerId)`
+   *   를 호출해 `WorkerSensitiveInfo.idNumberRaw` 만 일회성으로 사용.
+   *   메모리·로컬스토리지 잔존 최소화.
+   */
   idNumberRaw?: string;
   bankName: string;
   accountMasked: string;
-  /** 평문 계좌번호 (위와 동일) */
+  /**
+   * 평문 계좌번호 (위와 동일).
+   *
+   * @deprecated 신규 V2 화면에서 직접 참조 금지. `workerApi.getSensitive()` 사용.
+   */
   accountNumberRaw?: string;
   registrationMode: RegistrationMode;
   status: MemberStatus;

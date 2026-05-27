@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { localYearMonth } from '../utils/dateLocal';
 import { PageHeader } from '../components/PageHeader';
 import { siteApi } from '../api/site';
@@ -29,6 +29,8 @@ export function TaxManagementPage() {
   const [loading, setLoading] = useState(false);
   // 노무비 상세 팝업 — 클릭한 현장의 세금 상세 내역 표시
   const [detailSiteId, setDetailSiteId] = useState<string | null>(null);
+  // Phase U4: 근로자별 일자별 세금 상세 expand
+  const [expandedMemberId, setExpandedMemberId] = useState<string | null>(null);
 
   useEffect(() => {
     siteApi.listSites().then((s) => {
@@ -239,23 +241,82 @@ export function TaxManagementPage() {
                           <th className="tx-detail__num">소득세</th>
                           <th className="tx-detail__num">지방소득세</th>
                           <th className="tx-detail__num">합계</th>
+                          <th>상세</th>
                         </tr>
                       </thead>
                       <tbody>
                         {memberRows.map((m, i) => {
                           const inc = m.deductionIncomeTax || 0;
                           const loc = m.deductionLocalTax || 0;
+                          const isExpanded = expandedMemberId === m.memberId;
+                          const dailyRows = m.dailyTaxRows ?? [];
                           return (
-                            <tr key={m.memberId}>
-                              <td>{i + 1}</td>
-                              <td><strong>{m.memberName}</strong></td>
-                              <td>{m.role || '—'}</td>
-                              <td className="tx-detail__num">{m.workDays}일</td>
-                              <td className="tx-detail__num">{(m.baseAmount || 0).toLocaleString()}원</td>
-                              <td className="tx-detail__num">{inc.toLocaleString()}원</td>
-                              <td className="tx-detail__num">{loc.toLocaleString()}원</td>
-                              <td className="tx-detail__num"><strong>{(inc + loc).toLocaleString()}원</strong></td>
-                            </tr>
+                            <React.Fragment key={m.memberId}>
+                              <tr>
+                                <td>{i + 1}</td>
+                                <td><strong>{m.memberName}</strong></td>
+                                <td>{m.role || '—'}</td>
+                                <td className="tx-detail__num">{m.workDays}일</td>
+                                <td className="tx-detail__num">{(m.baseAmount || 0).toLocaleString()}원</td>
+                                <td className="tx-detail__num">{inc.toLocaleString()}원</td>
+                                <td className="tx-detail__num">{loc.toLocaleString()}원</td>
+                                <td className="tx-detail__num"><strong>{(inc + loc).toLocaleString()}원</strong></td>
+                                <td>
+                                  <button
+                                    type="button"
+                                    className="tx-btn tx-btn--ghost"
+                                    disabled={dailyRows.length === 0}
+                                    onClick={() => setExpandedMemberId(isExpanded ? null : m.memberId)}
+                                  >
+                                    {dailyRows.length === 0 ? '—' : (isExpanded ? '닫기' : '보기')}
+                                  </button>
+                                </td>
+                              </tr>
+                              {isExpanded && dailyRows.length > 0 && (
+                                <tr>
+                                  <td colSpan={9} style={{ background: '#f8fafc', padding: 8 }}>
+                                    <table className="tx-detail__table" style={{ fontSize: 12 }}>
+                                      <thead>
+                                        <tr>
+                                          <th>일자</th>
+                                          <th className="tx-detail__num">총지급</th>
+                                          <th className="tx-detail__num">비과세</th>
+                                          <th className="tx-detail__num">과세지급</th>
+                                          <th className="tx-detail__num">일액공제</th>
+                                          <th className="tx-detail__num">과세표준</th>
+                                          <th className="tx-detail__num">산출세액</th>
+                                          <th className="tx-detail__num">세액공제</th>
+                                          <th className="tx-detail__num">결정세액</th>
+                                          <th className="tx-detail__num">원천징수</th>
+                                          <th className="tx-detail__num">지방소득세</th>
+                                          <th className="tx-detail__num">합계세</th>
+                                          <th>경고</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {dailyRows.map((d) => (
+                                          <tr key={d.workDate}>
+                                            <td>{d.workDate}</td>
+                                            <td className="tx-detail__num">{(d.grossPay ?? d.payAmount ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.nonTaxablePay ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.taxableGrossPay ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.dailyDeduction ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.taxableDaily ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.calculatedIncomeTax ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.earnedIncomeTaxCredit ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.determinedIncomeTax ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.withheldIncomeTax ?? d.incomeTax ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.localIncomeTax ?? 0).toLocaleString()}</td>
+                                            <td className="tx-detail__num">{(d.totalTax ?? 0).toLocaleString()}</td>
+                                            <td>{d.warning ? String(d.warning) : ''}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
                           );
                         })}
                       </tbody>

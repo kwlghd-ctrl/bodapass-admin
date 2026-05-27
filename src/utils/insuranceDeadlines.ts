@@ -5,7 +5,7 @@
  *   1) 보험관계 성립신고 — 사업장(현장) 신설일로부터 14일 이내
  *   2) 자격취득 신고 — 근로자 고용일이 속한 달의 다음달 15일까지
  *   3) 근로내용확인신고 — 일용근로자 — 매월 다음달 15일까지 (지속 작업 중인 현장은 매월 1회)
- *   4) 보수총액 신고 — 자진신고 사업장(건설업) — 익년 3월 15일까지 (1년 1회)
+ *   4) 확정·개산 보험료 신고 — 건설업 자진신고 사업장 — 익년 3월 31일까지 (1년 1회)
  *
  * 출력: DeadlineItem[] — UI 에서 사이드바 뱃지 / 대시보드 알림 / 캘린더에 그대로 표시
  */
@@ -209,7 +209,7 @@ function buildMonthlyReportDeadlines(
 }
 
 // ─────────────────────────────────────────────
-// 4) 보수총액 신고 — 자진신고 사업장(건설업), 익년 3월 15일
+// 4) 확정·개산 보험료 신고 — 건설업 자진신고 사업장, 익년 3월 31일
 // ─────────────────────────────────────────────
 function buildAnnualTotalPayDeadlines(
   sites: Site[],
@@ -218,11 +218,11 @@ function buildAnnualTotalPayDeadlines(
   const items: DeadlineItem[] = [];
   const today = todayMidnight();
   const thisYear = today.getFullYear();
-  // 작년 보수총액 신고 마감 = 올해 3/15
-  // 올해 보수총액 신고 마감 = 내년 3/15 (D-90 부터 표시)
+  // 작년 확정/개산 신고 마감 = 올해 3/31
+  // 올해 확정/개산 신고 마감 = 내년 3/31 (D-90 부터 표시)
   const candidates = [
-    { year: thisYear - 1, dueDate: `${thisYear}-03-15` },
-    { year: thisYear,     dueDate: `${thisYear + 1}-03-15` },
+    { year: thisYear - 1, dueDate: `${thisYear}-03-31` },
+    { year: thisYear,     dueDate: `${thisYear + 1}-03-31` },
   ];
   for (const c of candidates) {
     if (reportedYears.has(String(c.year))) continue;
@@ -238,7 +238,7 @@ function buildAnnualTotalPayDeadlines(
       items.push({
         id: 'ANN-' + s.id + '-' + c.year,
         kind: 'ANNUAL_TOTAL_PAY',
-        title: `${c.year}년 보수총액 신고`,
+        title: `${c.year}년 확정·개산 보험료 신고`,
         description: `${s.name} — 자진신고(건설업) 확정정산`,
         siteId: s.id,
         siteName: s.name,

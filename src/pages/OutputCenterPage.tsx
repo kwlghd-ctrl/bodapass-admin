@@ -15,6 +15,8 @@ import { PageHeader } from '../components/PageHeader';
 import { siteApi } from '../api/site';
 import { wageApi } from '../api/wage';
 import { useAuth } from '../hooks/useAuth';
+import { filterReportRows, validateReportInput } from '../utils/wageReportValidator';
+import type { WageRow } from '../api/wage.types';
 import {
   buildInsuranceFiling,
   downloadInsuranceFilingXlsx,
@@ -27,6 +29,9 @@ import {
   type InsuranceKind,
   type FilingInput,
 } from '../utils/insuranceFiling';
+import { fetchSensitiveForRows } from './output/services/sensitive';
+import { buildFilingInputsFromReportRows } from './output/services/buildFilings';
+import { injectRrnToFilingInputs } from './output/services/injectRrn';
 import {
   detectInsuranceCycles,
   buildPendingFilings,
@@ -207,41 +212,80 @@ function InsuranceFilingTab({
 
   const currentSite = sites.find((s) => s.id === siteId) ?? null;
 
-  // 신고 행 미리보기
-  const filingInputs: FilingInput[] = useMemo(() => {
-    if (!summary) return [];
-    return summary.rows.map((r) => ({
-      name: r.memberName,
-      // 평문 주민번호는 권한 체크 후 멤버 API로 별도 가져옴 — 여기선 마스킹된 값
-      rrn: r.idNumberMasked.replace(/[^0-9]/g, '').slice(0, 13),
-      workDays: r.workDays,
-      gross: r.baseAmount,
-      incomeTax: r.deductionIncomeTax,
-      localTax: r.deductionLocalTax,
-      jobCode: undefined, // KECO 직종코드 — 추후 멤버 매핑 추가
-      foreigner: false,
-    }));
-  }, [summary]);
+  // 신고 행 미리보기 — Phase W4: dailyTaxRows 기반 1~31일 근로 마킹 + 비과세/과세 분리
+  // Phase W5: 평문 주민번호는 workerApi.getSensitive(workerId) 사용. idNumberMasked 직접 사용 금지.
+  //           localStorage 사용 금지 — 서버에서 권한 체크 + audit log 후에만 평문 반환.
+  // Phase X1: reportRows = filterReportRows(summary.rows) — 출역 0건 BLOCKED 제외
+  const reportRows: WageRow[] = useMemo(
+    () => (summary ? filterReportRows(summary.rows) : []),
+    [summary],
+  );
+
+  // Phase X2: filingInputs 는 reportRows 기준 (summary.rows 직접 map 금지)
+  // Phase X4: rrn 은 빌드 시점에 비워두고, 다운로드 핸들러에서 workerApi.getSensitive 로 주입.
+  // Phase Y5: gross / taxableGross / nontaxable 세 값을 모두 보존해 신고서 양식별로 정확히 매핑.
+  const filingInputs: FilingInput[] = useMemo(
+    () => buildFilingInputsFromReportRows(reportRows),
+    [reportRows],
+  );
+
+  // Phase AA2 — fetchSensitiveForRows 는 output/services/sensitive.ts 로 분리.
+  // yearMonth / siteId 를 options 로 전달.
 
   async function handleBuildAndDownload() {
     if (!summary || filingInputs.length === 0) {
       window.alert('해당 월·현장에 정산 데이터가 없습니다.');
       return;
     }
+    // Phase X3: 실제 신고서 생성은 strict=true — ESTIMATED 도 차단.
+    // Phase U3/W2: WageLedger 메타데이터 기반 신고서 검증.
+    const v = validateReportInput(reportRows, { strict: true });
+    if (!v.ok) {
+      window.alert('신고서 생성 차단 (strict):\n\n' + v.reason);
+      return;
+    }
+    if (v.warnings && v.warnings.length > 0) {
+      if (!window.confirm('다음 경고가 있습니다. 그래도 진행하시겠습니까?\n\n' + v.warnings.join('\n'))) return;
+    }
     setBusy(true);
     try {
+      // Phase X4 / Phase Y4 — 평문 주민번호 일괄 조회. 실패/13자리 아님 시 신고서 생성 차단.
+      const sensitiveMap = await fetchSensitiveForRows(reportRows, { yearMonth, siteId: siteId || undefined });
+      const missing = reportRows.filter((r) => {
+        const id = r.memberId;
+        const rrn = id ? sensitiveMap.get(id) : null;
+        return !rrn || rrn.length !== 13;
+      });
+      if (missing.length > 0) {
+        window.alert(
+          '신고서 생성 차단: 주민번호 13자리 확인이 필요한 근로자가 있습니다.\n\n' +
+            missing.map((r) => `- ${r.memberName}`).join('\n'),
+        );
+        setBusy(false);
+        return;
+      }
+      // Phase Y5 / Phase CC2 — rrn 주입은 services/injectRrn 의 순수 함수로 위임.
+      // sensitiveMap 에 없거나 13자리 아닌 항목은 빈 문자열로 채워짐 (사전 검증은 위쪽 missing 체크).
+      const rowsWithRrn = injectRrnToFilingInputs(
+        filingInputs,
+        reportRows.map((r) => r.memberId),
+        sensitiveMap,
+      );
+      // Phase EE3 — strictRrn=true: 13자리 주민번호 누락 시 즉시 throw (try/catch 가 catch)
       const doc = buildInsuranceFiling({
-        rows: filingInputs,
+        rows: rowsWithRrn,
         yearMonth,
         site: currentSite ? { id: currentSite.id, name: currentSite.name } : null,
         companyName,
         managerName,
         insuranceKind,
         reportToNts,
+        strictRrn: true,
       });
       appendInsuranceFilingArchive(doc);
       onArchiveChanged();
       await downloadInsuranceFilingXlsx(doc);
+      // sensitiveMap 은 함수 종료 시 GC — 별도 state 미저장.
     } catch (e) {
       console.error(e);
       window.alert('신고서 생성 실패: ' + (e instanceof Error ? e.message : '알 수 없는 오류'));

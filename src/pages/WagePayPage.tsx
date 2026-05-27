@@ -8,6 +8,7 @@ import {
   downloadLedgerXlsx,
   appendToArchive,
 } from '../utils/wageLedger';
+import { filterReportRows, validateReportInput } from '../utils/wageReportValidator';
 import { siteApi } from '../api/site';
 import { wageApi } from '../api/wage';
 import type { Site } from '../api/site.types';
@@ -81,10 +82,21 @@ export function WagePayPage() {
     const companyName = user?.companyName ?? '회사';
     const managerName = user?.name;
     let okCount = 0;
+    let blockedCount = 0;
     for (const s of targets) {
       const summary = wageBySite[s.id];
+      // Phase Y1 lockdown — 검증은 reportRows 로, 출력은 filteredSummary 로.
+      // raw summary.rows 를 buildLedgerFromWage 에 직접 전달하지 않는다.
+      const reportRows = filterReportRows(summary.rows);
+      const v = validateReportInput(reportRows, { strict: true });
+      if (!v.ok) {
+        blockedCount += 1;
+        console.warn('ledger blocked:', s.name, v.reason);
+        continue;
+      }
+      const filteredSummary = { ...summary, rows: reportRows };
       try {
-        const doc = buildLedgerFromWage({ summary, site: s, companyName, managerName });
+        const doc = buildLedgerFromWage({ summary: filteredSummary, site: s, companyName, managerName });
         appendToArchive(doc);
         await downloadLedgerXlsx(doc);
         okCount += 1;
@@ -98,8 +110,9 @@ export function WagePayPage() {
     if (okCount === 0) {
       window.alert('노무비대장 생성 실패. 다시 시도해주세요.');
     } else if (okCount < targets.length) {
-      window.alert(`${okCount}/${targets.length} 현장의 노무비대장이 다운로드되었습니다. 일부 실패가 있습니다.`);
+      window.alert(okCount + '/' + targets.length + ' 현장의 노무비대장이 다운로드되었습니다. 일부 실패가 있습니다.');
     }
+    void blockedCount;
   }
 
   useEffect(() => {

@@ -72,7 +72,8 @@ export function buildPayslipHtml(opts: {
         <tr><td>국민연금</td><td class="num">${krw(row.deductionPension)}</td><td class="small muted">기본급의 4.5%</td></tr>
         <tr><td>건강보험</td><td class="num">${krw(row.deductionHealth)}</td><td class="small muted">기본급의 약 3.5%</td></tr>
         <tr><td>고용보험</td><td class="num">${krw(row.deductionEmployment)}</td><td class="small muted">기본급의 0.9%</td></tr>
-        <tr><td>산재보험</td><td class="num">${krw(row.deductionAccident)}</td><td class="small muted">사업주 부담</td></tr>
+        <tr><td>산재보험 (근로자 공제)</td><td class="num">${krw(row.deductionAccident ?? 0)}</td><td class="small muted">근로자 부담 0원 (전액 사업주)</td></tr>
+        <tr><td>산재보험 (사업주 부담)</td><td class="num">${krw(row.industrialAccidentInsurance ?? 0)}</td><td class="small muted">사업주 100% 부담 (참고)</td></tr>
         <tr><td>소득세</td><td class="num">${krw(row.deductionIncomeTax)}</td><td class="small muted">간이세액</td></tr>
         <tr><td>지방세</td><td class="num">${krw(row.deductionLocalTax)}</td><td class="small muted">소득세의 10%</td></tr>
         <tr style="background:#fef2f2;">

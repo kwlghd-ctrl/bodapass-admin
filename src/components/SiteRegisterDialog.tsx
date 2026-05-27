@@ -348,6 +348,106 @@ export function SiteRegisterDialog({ open, onClose, onCreated }: Props) {
               <FieldX label="보험기준일" type="date" value={form.insuranceBaseDate ?? ''}
                 onChange={(v) => patch({ insuranceBaseDate: v })} />
             </Row>
+
+            {/* ── 법정 계산 추가 정보 (Phase 4) ────────────────────────── */}
+            <div className="srd-wiz__legal-section">
+              <h4 className="srd-wiz__section-title">법정 계산 정보 (예상값 산출용)</h4>
+              <Row cols={2}>
+                <SelectKV
+                  label="공사종류"
+                  value={form.constructionType ?? ''}
+                  onChange={(v) => patch({ constructionType: (v || undefined) as CreateSiteRequest['constructionType'] })}
+                  options={[
+                    { value: '', label: '선택 안 함' },
+                    { value: 'NEW_BUILD',  label: '신축' },
+                    { value: 'EXTENSION',  label: '증축' },
+                    { value: 'RENOVATION', label: '개축·리모델링' },
+                    { value: 'REPAIR',     label: '보수' },
+                    { value: 'DEMOLITION', label: '철거' },
+                    { value: 'CIVIL',      label: '토목' },
+                    { value: 'OTHER',      label: '기타' },
+                  ]}
+                />
+                <SelectKV
+                  label="보험 신고 형태"
+                  value={form.insuranceReportType ?? 'CONSTRUCTION_SELF'}
+                  onChange={(v) => patch({ insuranceReportType: v as CreateSiteRequest['insuranceReportType'] })}
+                  options={[
+                    { value: 'CONSTRUCTION_SELF', label: '건설업 자진신고' },
+                    { value: 'GENERAL',           label: '일반사업장 (개산보험료)' },
+                  ]}
+                />
+              </Row>
+              <Row cols={2}>
+                <FieldX label="공사 종료일 (실제)" type="date" value={form.constructionEndDate ?? ''}
+                  onChange={(v) => patch({ constructionEndDate: v })}
+                  helper="endDate 와 다를 경우만 입력" />
+                <FieldX label="준공일" type="date" value={form.completionDate ?? ''}
+                  onChange={(v) => patch({ completionDate: v })}
+                  helper="실제 준공된 날짜" />
+              </Row>
+              <Row>
+                <CheckboxX
+                  label="퇴직공제 적용 (건설현장 — 기본 체크)"
+                  checked={form.severanceApplicable !== false}
+                  onChange={(v) => patch({ severanceApplicable: v })}
+                />
+              </Row>
+
+              {/* ── 퇴직공제부금 일액 적용 방식 (현장 override) ──────── */}
+              {(form.severanceApplicable !== false) && (
+                <div className="srd-wiz__fund-mode">
+                  <p className="srd-wiz__sub-label">
+                    퇴직공제부금 일액 — 적용 방식
+                    <span className="srd-wiz__sub-helper">
+                      (미선택 시 설정 페이지의 전역 기본값 사용)
+                    </span>
+                  </p>
+                  <div className="srd-wiz__fund-mode-grid">
+                    {([
+                      { value: '',                  label: '🌐 전역 설정 사용', sub: 'SettingsPage 의 일액 사용' },
+                      { value: 'AUTO_BY_SITE_DATE', label: '🤖 자동 판단',      sub: '본 현장 날짜로 결정' },
+                      { value: 'FORCE_6500',        label: '🅐 6,500원',        sub: '기존 공사' },
+                      { value: 'FORCE_8700',        label: '🅑 8,700원',        sub: '2026-04-01 이후 신 정책' },
+                      { value: 'CUSTOM',            label: '✏️ 직접 입력',      sub: '시연·예외 현장' },
+                    ] as const).map((opt) => {
+                      const selected = (form.severanceFundMode ?? '') === opt.value;
+                      return (
+                        <button
+                          key={opt.value || 'NONE'}
+                          type="button"
+                          className={'srd-wiz__fund-card' + (selected ? ' is-selected' : '')}
+                          onClick={() =>
+                            patch({
+                              severanceFundMode: (opt.value || undefined) as CreateSiteRequest['severanceFundMode'],
+                            })
+                          }
+                        >
+                          <span className="srd-wiz__fund-card-label">{opt.label}</span>
+                          <span className="srd-wiz__fund-card-sub">{opt.sub}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {form.severanceFundMode === 'CUSTOM' && (
+                    <div style={{ marginTop: 8 }}>
+                      <FieldX
+                        label="직접 입력 금액 (원/출역일)"
+                        type="text"
+                        inputMode="numeric"
+                        value={form.severanceFundCustomAmount ? String(form.severanceFundCustomAmount) : ''}
+                        onChange={(v) => {
+                          const n = Number(v.replace(/[^0-9]/g, ''));
+                          patch({ severanceFundCustomAmount: isFinite(n) && n > 0 ? n : undefined });
+                        }}
+                        placeholder="예: 7,000"
+                        helper="시연·예외 현장 전용 — 일반적으로 자동 또는 6,500/8,700 권장"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -440,6 +540,62 @@ function SelectX({
   );
 }
 
+/** Key/Value 옵션 셀렉트 — value 와 label 이 다른 경우 (constructionType 등) */
+function SelectKV({
+  label, value, options, onChange, required,
+}: {
+  label: string;
+  value: string;
+  options: readonly { value: string; label: string }[];
+  onChange: (v: string) => void;
+  required?: boolean;
+}) {
+  return (
+    <div className="srd-wiz__field">
+      <label className="srd-wiz__label">
+        {label}
+        {required && <em className="srd-wiz__req">*</em>}
+      </label>
+      <MacSelect
+        value={value}
+        onChange={(v) => onChange(v)}
+        className="srd-wiz__input"
+        options={[...options]}
+      />
+    </div>
+  );
+}
+
+/** 단순 체크박스 (라벨 우측) */
+function CheckboxX({
+  label, checked, onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        fontSize: 13,
+        color: '#1c1c1e',
+        cursor: 'pointer',
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ width: 16, height: 16 }}
+      />
+      <span>{label}</span>
+    </label>
+  );
+}
+
 function InsuranceRow({
   label, mgmt, date, onMgmt, onDate,
 }: {
@@ -487,6 +643,15 @@ function emptyForm(): CreateSiteRequest {
     client: '', zipCode: '', address: '', addressDetail: '',
     manager: '', managerPhone: '', managerFax: '',
     siteAgent: {}, safetyOfficer: {}, qualityInspector: {},
+    // ─── 법정 계산 필드 (Phase 4) — 기본값 ────────────────────
+    constructionStartDate: '',
+    constructionEndDate: '',
+    completionDate: '',
+    constructionType: undefined,
+    severanceApplicable: true,
+    insuranceReportType: 'CONSTRUCTION_SELF',
+    severanceFundMode: undefined,
+    severanceFundCustomAmount: undefined,
   };
 }
 

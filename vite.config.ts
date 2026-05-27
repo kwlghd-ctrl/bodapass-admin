@@ -7,8 +7,27 @@ export default defineConfig({
   server: {
     port: 5174,
     host: true,
+    proxy: {
+      // /api/* 요청을 백엔드(localhost:3000) 로 그대로 전달
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
+    },
   },
   preview: {
     port: 4174,
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-xlsx': ['xlsx'],
+          'vendor-exceljs': ['exceljs'],
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 1000,
   },
 });

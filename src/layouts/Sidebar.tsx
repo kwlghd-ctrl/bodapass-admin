@@ -49,6 +49,8 @@ interface NavItem {
   children?: NavItem[];
   key?: string;
   color?: string;
+  /** 처리 필요 표시 — 사이드바에 「숨쉬기」 펄스 애니메이션 노출 */
+  pulse?: boolean;
 }
 
 const NAV_ITEMS_HQ: NavItem[] = [
@@ -61,10 +63,10 @@ const NAV_ITEMS_HQ: NavItem[] = [
     ],
   },
   {
-    key: 'workclose', label: '출역·노무마감', icon: <ClockIcon />, color: '#007AFF',
+    key: 'workclose', label: '출역·노무마감', icon: <ClockIcon />, color: '#007AFF', pulse: true,
     children: [
       { to: '/auth-mgmt',      label: '인증관리',      icon: <ClockIcon />, color: '#007AFF' },
-      { to: '/daily-confirm',  label: '일일 출역확정', icon: <ClockIcon />, color: '#007AFF' },
+      { to: '/daily-confirm',  label: '일일 출역확정', icon: <ClockIcon />, color: '#007AFF', pulse: true },
       { to: '/gongsu-close',   label: '월 공수마감',   icon: <WageIcon />,  color: '#007AFF' },
       { to: '/wage-close',     label: '노무비 마감',   icon: <WageIcon />,  color: '#007AFF' },
     ],
@@ -95,10 +97,10 @@ const NAV_ITEMS_SITE: NavItem[] = [
     children: [{ to: '/team', label: '인력관리', icon: <TeamIcon />, color: '#34C759' }],
   },
   {
-    key: 'workclose', label: '출역·노무마감', icon: <ClockIcon />, color: '#007AFF',
+    key: 'workclose', label: '출역·노무마감', icon: <ClockIcon />, color: '#007AFF', pulse: true,
     children: [
       { to: '/auth-mgmt',      label: '인증관리',      icon: <ClockIcon />, color: '#007AFF' },
-      { to: '/daily-confirm',  label: '일일 출역확정', icon: <ClockIcon />, color: '#007AFF' },
+      { to: '/daily-confirm',  label: '일일 출역확정', icon: <ClockIcon />, color: '#007AFF', pulse: true },
       { to: '/gongsu-close',   label: '월 공수마감',   icon: <WageIcon />,  color: '#007AFF' },
       { to: '/wage-close',     label: '노무비 마감',   icon: <WageIcon />,  color: '#007AFF' },
     ],
@@ -172,9 +174,13 @@ export function Sidebar({ collapsed = false }: Props) {
     return null;
   }, [navItems, location.pathname]);
 
+  // 초기 펼침 상태 — 「출역·노무마감」 (workclose) 만 펼침, 나머지는 닫음.
+  // (단, URL 컨텍스트가 다른 그룹에 속해 있으면 그 그룹도 펼친다 — 아래 useEffect 가 처리.)
   const [openMap, setOpenMap] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
-    navItems.forEach((it) => { if (it.children) init[itemKey(it)] = true; });
+    navItems.forEach((it) => {
+      if (it.children) init[itemKey(it)] = it.key === 'workclose';
+    });
     return init;
   });
 
@@ -266,10 +272,14 @@ export function Sidebar({ collapsed = false }: Props) {
         {navItems.map((it) => {
           const k = itemKey(it);
           if (it.children) {
-            const open = openMap[k] ?? true;
+            const open = openMap[k] ?? false;
+            const groupCls =
+              'sidebar__item sidebar__item--group' +
+              (activeGroupKey === k ? ' sidebar__item--group-active' : '') +
+              (it.pulse && !open ? ' sidebar__item--pulse' : '');
             return (
               <div key={k} className="sidebar__group">
-                <button type="button" className={'sidebar__item sidebar__item--group' + (activeGroupKey === k ? ' sidebar__item--group-active' : '')} onClick={() => toggleGroup(k)} aria-expanded={open}>
+                <button type="button" className={groupCls} onClick={() => toggleGroup(k)} aria-expanded={open}>
                   <span className="sidebar__item-icon">{it.icon}</span>
                   <span className="sidebar__item-label">{it.label}</span>
                   <span className="sidebar__chevron"><ChevronIcon open={open} /></span>
@@ -277,7 +287,16 @@ export function Sidebar({ collapsed = false }: Props) {
                 {open && (
                   <div className="sidebar__sub">
                     {it.children.map((c) => (
-                      <NavLink key={c.to} to={c.to!} end={c.end} className={({ isActive }) => 'sidebar__item sidebar__item--sub' + (isActive ? ' sidebar__item--active' : '')}>
+                      <NavLink
+                        key={c.to}
+                        to={c.to!}
+                        end={c.end}
+                        className={({ isActive }) =>
+                          'sidebar__item sidebar__item--sub' +
+                          (isActive ? ' sidebar__item--active' : '') +
+                          (c.pulse ? ' sidebar__item--pulse' : '')
+                        }
+                      >
                         <span className="sidebar__item-icon sidebar__item-icon--sub">{c.icon}</span>
                         <span className="sidebar__item-label">{c.label}</span>
                       </NavLink>

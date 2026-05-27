@@ -45,8 +45,16 @@ export interface LoginRequest {
 }
 
 export interface LoginResponse {
-  accessToken: string;
-  refreshToken: string;
+  /**
+   * accessToken — cookie 기반 인증에서는 백엔드가 cookie 로 발급.
+   * body 에는 옵션 (mock/legacy 호환). production 신규 코드는 cookie 만 사용.
+   */
+  accessToken?: string;
+  /**
+   * refreshToken — production 에서는 httpOnly cookie 로만.
+   * body 에 들어와도 JS 측에서 localStorage 저장 금지.
+   */
+  refreshToken?: string;
   user: AdminUser;
 }
 

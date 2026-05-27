@@ -11,16 +11,22 @@ import { teamApi } from '../api/team';
 import { siteApi } from '../api/site';
 import type { InsuranceFlags, TeamMember } from '../api/team.types';
 import type { Foreman, Site } from '../api/site.types';
+import { FaceVerifyRequestDialog } from './team/components/FaceVerifyRequestDialog';
 import { getErrorMessage } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { getAvatarUrl } from '../utils/avatar';
 import { formatRRN, formatAccount } from '../utils/phone';
 import { KOREAN_BANKS } from '../utils/banks';
 import { makeWorkerCode, decideTrustTier, tierLabel } from '../utils/workerCode';
+import { loadCompanyDisplayInfo } from '../utils/companyInfo';
 import './TeamListPage.css';
 import { TeamRegisterPage } from './TeamRegisterPage';
 import { TeamInvitePage } from './TeamInvitePage';
 import { ForemanRegisterDialog } from '../components/ForemanRegisterDialog';
+import { InsuranceDots } from './team/components/InsuranceDots';
+import { MaskCell } from './team/components/MaskCell';
+import { RoleBreakdown } from './team/components/RoleBreakdown';
+import { RecruitmentRequestDialog } from './team/components/RecruitmentRequestDialog';
 
 type MemberSortKey =
   | 'name'
@@ -1599,8 +1605,20 @@ function ExcelImportDialog({ onClose }: { onClose: () => void }) {
           </table>
         </div>
 
+        <p style={{padding:'6px 10px',background:'#FFF3CD',border:'1px solid #FFEEBA',borderRadius:6,color:'#856404',fontSize:12,marginBottom:8}}>
+          ⚠ 목업/시연용 — 사용자 업로드 xlsx 파싱은 브라우저에서 직접 처리됩니다. 실서비스에서는 서버 처리로 전환됩니다.
+        </p>
         <label className="excel-imp__file">
-          <input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} hidden />
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => {
+            const f = e.target.files?.[0] ?? null;
+            // Phase BB4 — xlsx 파일 크기 제한 10MB (Prototype Pollution / ReDoS 완화)
+            if (f && f.size > 10 * 1024 * 1024) {
+              alert('파일 크기 10MB 초과 — 거부 (xlsx 보안 정책)');
+              e.target.value = '';
+              return;
+            }
+            setFile(f);
+          }} hidden />
           <span className="excel-imp__file-btn">+ 업로드</span>
           {file && <span className="excel-imp__file-name">{file.name}</span>}
         </label>
@@ -1612,329 +1630,6 @@ function ExcelImportDialog({ onClose }: { onClose: () => void }) {
 
 /* ───────── 투입 인력 요청 다이얼로그 (출근가능 풀 + SMS) ───────── */
 
-function RecruitmentRequestDialog({
-  availableMembers,
-  allMembers,
-  foremen,
-  sites,
-  onClose,
-}: {
-  availableMembers: TeamMember[];
-  allMembers: TeamMember[];
-  foremen: Foreman[];
-  sites: Site[];
-  onClose: () => void;
-}) {
-  const inProgressSites = sites.filter((s) => s.status !== 'COMPLETED');
-  // 폼 state
-  const [siteId, setSiteId] = useState<string>(inProgressSites[0]?.id ?? '');
-  const [role, setRole] = useState<string>('철근공');
-  const [wage, setWage] = useState<string>('250000');
-  const today = localDateStr();
-  const oneMonthLater = (() => {
-    const d = new Date(); d.setMonth(d.getMonth() + 1);
-    return localDateStr(d);
-  })();
-  const [startDate, setStartDate] = useState<string>(today);
-  const [endDate, setEndDate] = useState<string>(oneMonthLater);
-  const [headcount, setHeadcount] = useState<string>('5');
-  const [perks, setPerks] = useState({
-    lodging: false,    // 숙소 지원
-    meal: false,       // 식대 지원
-    transit: false,    // 교통비 지원
-    equipment: false,  // 장비 지참
-    experienced: false,// 경력자 우대
-    foreigner: false,  // 외국인 가능
-    etc: false,
-  });
-  const [perksEtc, setPerksEtc] = useState<string>('');
-  // 발송 대상 반장 (멀티 선택)
-  const [selectedForemen, setSelectedForemen] = useState<Set<string>>(
-    () => new Set(foremen.map((f) => f.id)),
-  );
-  const [sending, setSending] = useState(false);
-  /** 발송 전 미리보기 팝업 — 텍스트 확인 후 전송 */
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const { user } = useAuth();
-
-  function toggleForeman(id: string) {
-    setSelectedForemen((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }
-  function toggleAllForemen() {
-    if (selectedForemen.size === foremen.length) {
-      setSelectedForemen(new Set());
-    } else {
-      setSelectedForemen(new Set(foremen.map((f) => f.id)));
-    }
-  }
-
-  const selectedSite = sites.find((s) => s.id === siteId);
-
-  /** 발송 메시지 본문 생성 — 미리보기 / 실 발송에서 동일하게 사용 */
-  function buildMessage(): string {
-    const perkList: string[] = [];
-    if (perks.lodging) perkList.push('숙소 지원');
-    if (perks.meal) perkList.push('식대 지원');
-    if (perks.transit) perkList.push('교통비 지원');
-    if (perks.equipment) perkList.push('장비 지참');
-    if (perks.experienced) perkList.push('경력자 우대');
-    if (perks.foreigner) perkList.push('외국인 가능');
-    if (perks.etc && perksEtc.trim()) perkList.push(perksEtc.trim());
-    const wageNum = Number(wage.replace(/[^0-9]/g, ''));
-    const requester = user?.name ?? user?.companyName ?? '아코마';
-    // 등록 링크 — 추후 토큰·짧은 URL 로 교체
-    const link = 'https://bodapass.app/recruit/...';
-    return (
-      `[보다패스 인력요청]\n` +
-      `현장: ${selectedSite?.name ?? siteId}\n` +
-      `직종: ${role}\n` +
-      `인원: ${headcount}명\n` +
-      `일당: ${wageNum.toLocaleString()}원\n` +
-      `기간: ${startDate} ~ ${endDate}\n` +
-      (perkList.length > 0 ? `조건: ${perkList.join(', ')}\n` : '') +
-      `요청자: ${requester}\n` +
-      `등록 링크: ${link}`
-    );
-  }
-
-  /** 1단계 — 폼 검증 후 미리보기 팝업 오픈 */
-  function handleOpenPreview() {
-    if (!siteId) { window.alert('현장을 선택해주세요.'); return; }
-    if (!role.trim()) { window.alert('직종을 입력해주세요.'); return; }
-    if (selectedForemen.size === 0) { window.alert('발송 대상 반장을 한 명 이상 선택해주세요.'); return; }
-    if (perks.etc && !perksEtc.trim()) { window.alert('「기타」 특약사항 내용을 입력해주세요.'); return; }
-    setPreviewOpen(true);
-  }
-
-  /** 2단계 — 미리보기 후 실제 전송 */
-  function handleConfirmSend() {
-    setPreviewOpen(false);
-    setSending(true);
-    setTimeout(() => {
-      window.alert(`✓ 반장 ${selectedForemen.size}명에게 인력요청 SMS 전송됐습니다 (mock).`);
-      setSending(false);
-      onClose();
-    }, 400);
-  }
-
-  return (
-    <Modal
-      open={true}
-      onClose={onClose}
-      title="투입 인력 요청"
-      subtitle={`출근가능 인력 ${availableMembers.length}명 · 등록 반장 ${foremen.length}명에게 SMS 발송`}
-      width={680}
-      footer={
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <button
-            type="button"
-            className="team-list__btn team-list__btn--ghost"
-            onClick={onClose}
-            disabled={sending}
-          >
-            취소
-          </button>
-          <button
-            type="button"
-            className="team-list__btn team-list__btn--primary"
-            onClick={handleOpenPreview}
-            disabled={sending || selectedForemen.size === 0}
-          >
-            {sending ? '요청 중…' : `반장 ${selectedForemen.size}명에게 요청`}
-          </button>
-        </div>
-      }
-    >
-      <div className="recruit">
-        {/* 현재 출근가능 풀 요약 */}
-        <section className="recruit__pool">
-          <h4 className="recruit__sec-h">출근가능 풀 ({availableMembers.length}명)</h4>
-          {availableMembers.length === 0 ? (
-            <p className="recruit__muted">현장 미배정 + 출근 준비된 인력이 없습니다. 반장에게 투입 인력 요청을 보내 새 인력을 받을 수 있습니다.</p>
-          ) : (
-            <ul className="recruit__pool-list">
-              {availableMembers.slice(0, 8).map((m) => (
-                <li key={m.id} className="recruit__pool-item">
-                  <strong>{m.name}</strong>
-                  <span className="recruit__pool-meta">{m.role} · {m.dailyWage.toLocaleString()}원</span>
-                </li>
-              ))}
-              {availableMembers.length > 8 && (
-                <li className="recruit__pool-more">외 {availableMembers.length - 8}명</li>
-              )}
-            </ul>
-          )}
-        </section>
-
-        {/* 투입 인력 요청 폼 */}
-        <section className="recruit__form">
-          <h4 className="recruit__sec-h">요청 내용</h4>
-          <div className="recruit__row">
-            <label className="recruit__field">
-              <span>현장 *</span>
-              <select value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-                {inProgressSites.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
-            </label>
-            <label className="recruit__field">
-              <span>직종 *</span>
-              <input
-                type="text"
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                placeholder="예: 철근공, 형틀공"
-              />
-            </label>
-          </div>
-          <div className="recruit__row">
-            <label className="recruit__field">
-              <span>예상 일당 *</span>
-              <input
-                type="text"
-                value={wage}
-                onChange={(e) => setWage(e.target.value.replace(/[^0-9]/g, ''))}
-                placeholder="250000"
-              />
-            </label>
-            <label className="recruit__field">
-              <span>필요 인원 *</span>
-              <input
-                type="text"
-                value={headcount}
-                onChange={(e) => setHeadcount(e.target.value.replace(/[^0-9]/g, ''))}
-                placeholder="5"
-              />
-            </label>
-          </div>
-          <div className="recruit__row">
-            <label className="recruit__field">
-              <span>근무 시작 *</span>
-              <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-            </label>
-            <label className="recruit__field">
-              <span>근무 종료</span>
-              <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-            </label>
-          </div>
-
-          {/* 특약사항 */}
-          <div className="recruit__perks">
-            <span className="recruit__perks-label">특약사항</span>
-            <div className="recruit__perks-chips">
-              <label className={'recruit__perk' + (perks.lodging ? ' is-on' : '')}>
-                <input type="checkbox" checked={perks.lodging} onChange={(e) => setPerks((p) => ({ ...p, lodging: e.target.checked }))} />
-                <span>숙소 지원</span>
-              </label>
-              <label className={'recruit__perk' + (perks.meal ? ' is-on' : '')}>
-                <input type="checkbox" checked={perks.meal} onChange={(e) => setPerks((p) => ({ ...p, meal: e.target.checked }))} />
-                <span>식대 지원</span>
-              </label>
-              <label className={'recruit__perk' + (perks.transit ? ' is-on' : '')}>
-                <input type="checkbox" checked={perks.transit} onChange={(e) => setPerks((p) => ({ ...p, transit: e.target.checked }))} />
-                <span>교통비 지원</span>
-              </label>
-              <label className={'recruit__perk' + (perks.equipment ? ' is-on' : '')}>
-                <input type="checkbox" checked={perks.equipment} onChange={(e) => setPerks((p) => ({ ...p, equipment: e.target.checked }))} />
-                <span>장비 지참</span>
-              </label>
-              <label className={'recruit__perk' + (perks.experienced ? ' is-on' : '')}>
-                <input type="checkbox" checked={perks.experienced} onChange={(e) => setPerks((p) => ({ ...p, experienced: e.target.checked }))} />
-                <span>경력자 우대</span>
-              </label>
-              <label className={'recruit__perk' + (perks.foreigner ? ' is-on' : '')}>
-                <input type="checkbox" checked={perks.foreigner} onChange={(e) => setPerks((p) => ({ ...p, foreigner: e.target.checked }))} />
-                <span>외국인 가능</span>
-              </label>
-              <label className={'recruit__perk' + (perks.etc ? ' is-on' : '')}>
-                <input type="checkbox" checked={perks.etc} onChange={(e) => setPerks((p) => ({ ...p, etc: e.target.checked }))} />
-                <span>기타</span>
-              </label>
-            </div>
-            {perks.etc && (
-              <input
-                type="text"
-                className="recruit__perk-etc"
-                value={perksEtc}
-                onChange={(e) => setPerksEtc(e.target.value)}
-                placeholder="기타 특약사항을 자유롭게 입력하세요 (예: 숙소 제공, 주말 수당 등)"
-              />
-            )}
-          </div>
-        </section>
-
-        {/* 발송 대상 반장 */}
-        <section className="recruit__recipients">
-          <header className="recruit__sec-head">
-            <h4 className="recruit__sec-h">발송 대상 반장 ({selectedForemen.size}/{foremen.length})</h4>
-            <button
-              type="button"
-              className="recruit__select-all"
-              onClick={toggleAllForemen}
-            >
-              {selectedForemen.size === foremen.length ? '전체 해제' : '전체 선택'}
-            </button>
-          </header>
-          <ul className="recruit__recipients-list">
-            {foremen.map((f) => {
-              const teamCount = allMembers.filter((m) => m.foremanId === f.id).length;
-              const checked = selectedForemen.has(f.id);
-              return (
-                <li key={f.id}>
-                  <label className={'recruit__recipient' + (checked ? ' is-on' : '')}>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleForeman(f.id)}
-                    />
-                    <span className="recruit__recipient-name">{f.name}</span>
-                    <span className="recruit__recipient-meta">{f.phone} · 팀원 {teamCount}명</span>
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      </div>
-
-      {previewOpen && (
-        <Modal
-          open={true}
-          onClose={() => setPreviewOpen(false)}
-          title="문자 미리보기"
-          subtitle={`반장 ${selectedForemen.size}명에게 아래 메시지가 SMS 로 전송됩니다`}
-          width={460}
-          footer={
-            <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
-              <button
-                type="button"
-                className="team-list__btn team-list__btn--ghost"
-                onClick={() => setPreviewOpen(false)}
-              >
-                ← 수정
-              </button>
-              <button
-                type="button"
-                className="team-list__btn team-list__btn--primary"
-                onClick={handleConfirmSend}
-                disabled={sending}
-              >
-                {sending ? '전송 중…' : '전송'}
-              </button>
-            </div>
-          }
-        >
-          <pre className="recruit__preview">{buildMessage()}</pre>
-        </Modal>
-      )}
-    </Modal>
-  );
-}
 
 /* ───────── 근로자 상세 패널 (5섹션) ───────── */
 
@@ -3105,10 +2800,16 @@ function ContractSendDialog({
       return null;
     }
   })();
-  const [companyName, setCompanyName] = useState(cached?.companyName ?? user?.companyName ?? '');
-  const [ceoName, setCeoName] = useState(cached?.ceoName ?? '');
-  const [companyAddr, setCompanyAddr] = useState(cached?.companyAddr ?? '');
-  const [companyPhone, setCompanyPhone] = useState(cached?.companyPhone ?? '');
+  // SettingsPage 회사 정보 → 두 번째 디폴트 소스
+  //   loadCompanyDisplayInfo() 가 DEFAULT_COMPANY_INFO 로 폴백하므로 항상 자동 채워집니다.
+  //   우선순위: 이전 계약서 캐시 > SettingsPage 회사 정보 > user.companyName > 빈 문자열
+  const settingsCompany = loadCompanyDisplayInfo();
+  const [companyName, setCompanyName] = useState(
+    cached?.companyName ?? settingsCompany.companyName ?? user?.companyName ?? '',
+  );
+  const [ceoName, setCeoName] = useState(cached?.ceoName ?? settingsCompany.ceoName ?? '');
+  const [companyAddr, setCompanyAddr] = useState(cached?.companyAddr ?? settingsCompany.companyAddr ?? '');
+  const [companyPhone, setCompanyPhone] = useState(cached?.companyPhone ?? settingsCompany.companyPhone ?? '');
 
   // 계약 기간 — 오늘 ~ 공사 완료시까지
   const today = useMemo(() => {
@@ -3680,123 +3381,8 @@ function ContractSendDialog({
 }
 
 /* ───────── 얼굴인증 요청 다이얼로그 ───────── */
-function FaceVerifyRequestDialog({
-  member,
-  foreman,
-  siteName,
-  onClose,
-  onSent,
-}: {
-  member: TeamMember;
-  foreman: Foreman | null;
-  siteName: string;
-  onClose: () => void;
-  onSent: () => void;
-}) {
-  const [sending, setSending] = useState(false);
-  const targetName = foreman ? `${foreman.name} 반장` : '현장담당자';
-  const targetPhone = foreman?.phone || '현장담당자';
-  const messageBody =
-    `[보다패스] ${targetName}님,\n` +
-    `${siteName}\n${member.name}님(${member.phone})의\n얼굴인증이 아직 완료되지 않았습니다.\n\n` +
-    `출퇴근 본인확인을 위해 다음 출근 시 사진 등록을 완료할 수 있도록 안내 부탁드립니다.\n\n` +
-    `* 인증 안내 링크: https://bodapass.app/face/${member.id}`;
-
-  async function handleSend() {
-    setSending(true);
-    try {
-      await new Promise((r) => setTimeout(r, 300));
-      window.alert(
-        `${targetName}(${targetPhone})에게\n` +
-          `${member.name}님의 얼굴인증 요청이 발송되었습니다.`,
-      );
-      onSent();
-    } finally {
-      setSending(false);
-    }
-  }
-
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title="얼굴인증 요청 발송"
-      subtitle={`${member.name} · ${siteName}`}
-      width={520}
-      footer={
-        <div className="med__cta">
-          <button type="button" className="team-list__btn team-list__btn--ghost" onClick={onClose} disabled={sending}>
-            취소
-          </button>
-          <button type="button" className="team-list__btn team-list__btn--primary" onClick={handleSend} disabled={sending}>
-            {sending ? '발송 중…' : '📧 요청 발송'}
-          </button>
-        </div>
-      }
-    >
-      <div className="med">
-        <div className="med__row">
-          <label>요청 대상</label>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>{targetName}</div>
-            <div style={{ fontSize: 11.5, color: 'var(--color-text-muted)', marginTop: 2 }}>
-              {foreman ? `${foreman.phone} · ${foreman.role || '반장'}` : '반장 미배정 — 현장담당자가 직접 처리'}
-            </div>
-          </div>
-        </div>
-
-        <div className="med__row" style={{ alignItems: 'flex-start' }}>
-          <label style={{ paddingTop: 6 }}>메시지 미리보기</label>
-          <pre
-            style={{
-              margin: 0,
-              padding: '10px 12px',
-              background: 'var(--color-bg-soft)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 8,
-              fontSize: 12,
-              fontFamily: 'inherit',
-              whiteSpace: 'pre-wrap',
-              lineHeight: 1.5,
-              color: 'var(--color-text)',
-            }}
-          >
-            {messageBody}
-          </pre>
-        </div>
-      </div>
-    </Modal>
-  );
-}
 
 /* ───────── 마스킹 ↔ 원본 토글 셀 (테이블에서 사용) ───────── */
-function MaskCell({
-  masked,
-  raw,
-  label,
-}: {
-  masked?: string;
-  raw?: string;
-  label: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const text = open ? (raw || masked || '') : (masked || '');
-  if (!masked) return null;
-  return (
-    <button
-      type="button"
-      className={'mask-cell' + (open ? ' is-open' : '')}
-      onClick={(e) => {
-        e.stopPropagation();
-        setOpen((v) => !v);
-      }}
-      title={open ? `${label} — 클릭하여 마스킹` : `${label} — 클릭하여 보기`}
-    >
-      <span className="mask-cell__text">{text}</span>
-      <span className="mask-cell__icon" aria-hidden>{open ? '🙈' : '👁'}</span>
-    </button>
-  );
-}
 
 /* ───────── 정렬 가능한 컬럼 헤더 ───────── */
 
@@ -3835,42 +3421,6 @@ function SortHeader({
 
 /* ───────── 직종별 카운트 칩 ───────── */
 
-function RoleBreakdown({
-  total,
-  countByRole,
-  activeRole,
-  onSelect,
-}: {
-  total: number;
-  countByRole: Map<string, number>;
-  activeRole: string | null;
-  onSelect: (role: string | null) => void;
-}) {
-  const entries = Array.from(countByRole.entries()).sort(
-    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ko'),
-  );
-  return (
-    <div className="role-bd">
-      <button
-        type="button"
-        className={'role-bd__chip role-bd__chip--all' + (!activeRole ? ' is-active' : '')}
-        onClick={() => onSelect(null)}
-      >
-        전체 <em>{total}</em>
-      </button>
-      {entries.map(([role, count]) => (
-        <button
-          key={role}
-          type="button"
-          className={'role-bd__chip' + (activeRole === role ? ' is-active' : '')}
-          onClick={() => onSelect(activeRole === role ? null : role)}
-        >
-          {role} <em>{count}</em>
-        </button>
-      ))}
-    </div>
-  );
-}
 
 /* ── 4대보험 가입 인디케이터 (4개 미니 점) ── */
 /** 필수서류 상태 — 완료는 박스 없이 「✓계약」 평문, 미완료는 노란 워닝 chip */
@@ -3915,25 +3465,3 @@ function DocStatusChip({
   );
 }
 
-function InsuranceDots({ insurance }: { insurance?: InsuranceFlags }) {
-  const ins = insurance ?? { pension: false, health: false, employment: false, accident: false };
-  const items: { k: keyof InsuranceFlags; label: string; full: string }[] = [
-    { k: 'pension', label: '국', full: '국민연금' },
-    { k: 'health', label: '건', full: '건강보험' },
-    { k: 'employment', label: '고', full: '고용보험' },
-    { k: 'accident', label: '산', full: '산재보험' },
-  ];
-  return (
-    <span className="ins-dots">
-      {items.map((it) => (
-        <span
-          key={it.k}
-          className={'ins-dot' + (ins[it.k] ? ' is-on' : '')}
-          title={`${it.full} ${ins[it.k] ? '가입' : '미가입'}`}
-        >
-          {it.label}
-        </span>
-      ))}
-    </span>
-  );
-}

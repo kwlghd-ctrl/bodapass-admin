@@ -29,6 +29,39 @@ export interface WageRow {
   netAmount: number;
   /** 퇴직금 적립 (이번 달 분) */
   severanceAccrued: number;
+
+  /* ── Phase U1: WageLedger 메타데이터 보존 (모두 선택, 레거시 호환 유지) ── */
+  /** 계산 상태 — READY/ESTIMATED/BLOCKED */
+  calculationStatus?: 'READY' | 'ESTIMATED' | 'BLOCKED';
+  /** 경고 메시지 목록 */
+  warnings?: string[];
+  /** 과세 보수 */
+  taxableWage?: number;
+  /** 비과세 합계 */
+  nonTaxableAmount?: number;
+  /** 사용된 정책 버전 */
+  policyVersion?: string;
+  /** 일자별 소득세 명세 (16-field full row) */
+  dailyTaxRows?: import('../utils/incomeTaxDaily').DailyTaxRow[];
+  /**
+   * 일자별 출역·공수 명세 (Phase Z1 신규).
+   * 노임대장 1~31일 칸의 finalGongsu 출력에 사용.
+   * dailyTaxRows 가 「지급 기준」인 반면, 이건 「출역 기준」이라 별도 보존.
+   */
+  dailyAttendanceRows?: Array<{
+    workDate: string;
+    workerId?: string;
+    employmentId?: string;
+    finalGongsu: number;
+    workedMinutes: number;
+    payAmount?: number;
+  }>;
+  /** 퇴직공제부금 일액 */
+  severanceFundDaily?: number;
+  /** 퇴직공제부금 금액 (= severanceFundDaily × severanceWorkDays) */
+  severanceFundAmount?: number;
+  /** 산재보험 (사업주 100% 부담분, 표시용) */
+  industrialAccidentInsurance?: number;
 }
 
 export interface WageMonthSummary {

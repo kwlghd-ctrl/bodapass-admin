@@ -238,6 +238,54 @@ VITE_API_BASE_URL=https://api.your-domain.com
 
 ---
 
+## 법정 계산 / 운영 로직 이식 (Phase M)
+
+본 빌드에는 기존 운영형 시스템의 출역·노임·세금·보험·퇴직공제 계산 로직이 mock 으로 이식되어 있습니다.
+실 DB 미연결 상태에서도 「예상값」 형태로 화면에 표시 / 검증 가능합니다.
+
+### 핵심 데이터 흐름
+
+```
+AttendanceRecord[] ─▶ MonthlyAttendanceSummary ─▶ WageLedger ─▶ {Tax / Insurance / Severance}Result ─▶ 화면
+```
+
+세부 단계·필드 매핑·테스트 케이스는 다음 문서를 참조:
+
+- [`docs/legacy-labor-logic-mapping.md`](docs/legacy-labor-logic-mapping.md) — 운영 SP / 상수 → mock 함수 / 정책 카테고리 매핑
+- [`docs/wage-and-tax-calculation-flow.md`](docs/wage-and-tax-calculation-flow.md) — 12 단계 계산 흐름 + 산식 + 테스트 케이스
+- [`docs/data-requirements-for-legal-calculation.md`](docs/data-requirements-for-legal-calculation.md) — 각 계산별 필수 입력 데이터
+- [`docs/mock-to-database-migration-plan.md`](docs/mock-to-database-migration-plan.md) — 실 DB 전환 단계 / 정책 테이블 이관
+
+### 퇴직공제부금 일액 결정 — 4-mode 선택
+
+설정 > 세율 관리 화면에서 퇴직공제부금 일액 적용 방식을 4가지 중 선택할 수 있습니다.
+
+| 모드                | 의미                                                              |
+|---------------------|-------------------------------------------------------------------|
+| `AUTO_BY_SITE_DATE` | 현장 입찰공고일 / 도급계약일을 기준으로 자동 결정 (2026-04-01 경계) |
+| `FORCE_6500`        | 6,500원 강제 (기존 공사)                                          |
+| `FORCE_8700`        | 8,700원 강제 (2026-04-01 이후 신 정책)                            |
+| `CUSTOM`            | 직접 입력 — 시연 / 예외 현장                                      |
+
+우선순위: **Site override > Global setting > Auto policy**. 구현은 `src/utils/severance.ts` 의 `resolveSeveranceFundDaily()` 참고.
+
+### 정책 테이블 분리
+
+요율·한도 등 정책 수치는 코드에 직접 박지 않고 `src/mock/legalPolicies.ts` 의 `LEGAL_POLICIES` 테이블에서 `lookupPolicy(category, asOfDate)` 로 조회합니다.
+각 정책에는 `confidence` (`OFFICIAL` / `ASSUMED` / `DEMO`) 와 `requiresVerification` 플래그가 있어, 화면에서 「검증 필요」 라벨을 자동 노출합니다.
+
+### 「예상값」 라벨 정책
+
+`src/utils/legalDataValidation.ts` 의 `UI_LABEL_TEXT`:
+
+- `CONFIRMED` → 「기준정보 충족 — 예상값」
+- `ESTIMATED` → 「일부 기준정보 누락 — 검증 필요」
+- `BLOCKED`   → 「계산 불가 — 필수 데이터 누락」
+
+운영의 「확정 신고금액」 표현은 mock 단계에서 사용하지 않습니다.
+
+---
+
 ## TODO / 개선 후보
 
 - [ ] 토큰을 `localStorage` 대신 `httpOnly` 쿠키로 (XSS 방어)

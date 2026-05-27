@@ -28,11 +28,12 @@ import {
 } from '../utils/electronicCard';
 import './ElectronicCardCompare.css';
 
-const STATUS_ORDER: DiffStatus[] = ['UNMATCHED', 'CARD_ONLY', 'FACE_ONLY', 'TIME_DIFF', 'OK'];
+const STATUS_ORDER: DiffStatus[] = ['UNMATCHED', 'CARD_ONLY', 'FACE_ONLY', 'MISSING_TIME', 'TIME_DIFF', 'OK'];
 
 const STATUS_COLOR: Record<DiffStatus, string> = {
   OK: '#34C759',
   TIME_DIFF: '#FF9500',
+  MISSING_TIME: '#AF52DE',
   CARD_ONLY: '#FF3B30',
   FACE_ONLY: '#FF3B30',
   UNMATCHED: '#8E8E93',
@@ -55,7 +56,7 @@ export function ElectronicCardCompare({ siteId, yearMonth, sites }: Props) {
   const [sheet, setSheet] = useState<ECardSheet | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<Set<DiffStatus>>(
-    () => new Set<DiffStatus>(['UNMATCHED', 'CARD_ONLY', 'FACE_ONLY', 'TIME_DIFF']),
+    () => new Set<DiffStatus>(['UNMATCHED', 'CARD_ONLY', 'FACE_ONLY', 'MISSING_TIME', 'TIME_DIFF']),
   );
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -134,10 +135,10 @@ export function ElectronicCardCompare({ siteId, yearMonth, sites }: Props) {
     }
   }
 
-  function handleDownload() {
+  async function handleDownload() {
     if (!compareResult) return;
     const site = sites.find((s) => s.id === siteId);
-    const blob = exportDiffToXlsx(compareResult.rows, compareResult.summary, {
+    const blob = await exportDiffToXlsx(compareResult.rows, compareResult.summary, {
       siteName: site?.name,
       yearMonth,
     });
@@ -153,6 +154,9 @@ export function ElectronicCardCompare({ siteId, yearMonth, sites }: Props) {
 
   return (
     <section className="ecard card">
+      <p style={{padding:'6px 10px',background:'#FFF3CD',border:'1px solid #FFEEBA',borderRadius:6,color:'#856404',fontSize:12,marginBottom:8}}>
+        ⚠ 목업/시연용 — 사용자 업로드 xlsx 파싱은 브라우저에서 직접 처리됩니다. 실서비스에서는 서버 처리로 전환됩니다.
+      </p>
       <div className="ecard__head">
         <div>
           <h3 className="ecard__title">전자카드 ↔ 얼굴인식 출역 비교</h3>
@@ -271,6 +275,7 @@ function SummaryBar({
   const counts: Record<DiffStatus, number> = {
     OK: summary.matched,
     TIME_DIFF: summary.timeDiff,
+    MISSING_TIME: summary.missingTime,
     CARD_ONLY: summary.cardOnly,
     FACE_ONLY: summary.faceOnly,
     UNMATCHED: summary.unmatched,

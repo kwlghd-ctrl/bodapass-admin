@@ -20,6 +20,13 @@ import {
   loadFundDaily,
   saveFundDaily,
   DEFAULT_FUND_DAILY,
+  FUND_DAILY_OLD,
+  FUND_DAILY_NEW,
+  loadFundSetting,
+  saveFundSetting,
+  resolveSeveranceFundDaily,
+  type SeveranceFundApplyMode,
+  type SeveranceFundSetting,
 } from '../utils/severance';
 import './SettingsPage.css';
 
@@ -428,48 +435,119 @@ function TaxRatePanel() {
   );
 }
 
-/* ───────── ②-2 퇴직공제부금 일액 ───────── */
+/* ───────── ②-2 퇴직공제부금 일액 적용 방식 ─────────
+ *
+ * 4가지 선택지:
+ *   · AUTO_BY_SITE_DATE : 현장별 입찰공고일/도급계약일 기준 자동 (2026-04-01 이전 6,500 / 이후 8,700)
+ *   · FORCE_6500        : 6,500원 강제 (기존 공사)
+ *   · FORCE_8700        : 8,700원 강제 (2026-04-01 이후 신 정책)
+ *   · CUSTOM            : 직접 입력
+ *
+ * Site 의 severanceFundMode 가 설정되어 있으면 본 전역 설정보다 우선.
+ */
+const FUND_MODE_OPTIONS: { value: SeveranceFundApplyMode; label: string; sub: string }[] = [
+  { value: 'AUTO_BY_SITE_DATE', label: '🤖 자동 판단', sub: '현장 입찰공고일/도급계약일 기준' },
+  { value: 'FORCE_6500',        label: '🅐 6,500원',  sub: '기존 공사 — 2026-04-01 이전' },
+  { value: 'FORCE_8700',        label: '🅑 8,700원',  sub: '신 정책 — 2026-04-01 이후' },
+  { value: 'CUSTOM',            label: '✏️ 직접 입력', sub: '시연·예외 현장용 임의 금액' },
+];
 
 function MutualAidFundPanel() {
-  const [value, setValue] = useState<number>(() => loadFundDaily());
-  const [draft, setDraft] = useState<string>(() => String(loadFundDaily()));
+  // 기존 setting 로드 — 없으면 기본 AUTO
+  const initialSetting: SeveranceFundSetting = useMemo(() => {
+    return (
+      loadFundSetting() ?? {
+        mode: 'AUTO_BY_SITE_DATE',
+        customAmount: loadFundDaily(),
+        updatedAt: new Date().toISOString(),
+      }
+    );
+  }, []);
+
+  const [setting, setSetting] = useState<SeveranceFundSetting>(initialSetting);
+  const [draftMode, setDraftMode] = useState<SeveranceFundApplyMode>(initialSetting.mode);
+  const [draftCustom, setDraftCustom] = useState<string>(
+    String(initialSetting.customAmount ?? FUND_DAILY_NEW),
+  );
   const [editing, setEditing] = useState(false);
 
+  // 「현재 적용 일액」 미리보기 — Site override 없는 케이스의 글로벌 값.
+  const currentDaily = useMemo(() => {
+    const dec = resolveSeveranceFundDaily({ site: null, globalSetting: setting });
+    return dec.fundDaily;
+  }, [setting]);
+
   function start() {
-    setDraft(String(value));
+    setDraftMode(setting.mode);
+    setDraftCustom(String(setting.customAmount ?? FUND_DAILY_NEW));
     setEditing(true);
   }
   function cancel() {
-    setDraft(String(value));
+    setDraftMode(setting.mode);
+    setDraftCustom(String(setting.customAmount ?? FUND_DAILY_NEW));
     setEditing(false);
   }
   function save() {
-    const n = Number(String(draft).replace(/[^0-9]/g, ''));
-    if (!isFinite(n) || n <= 0) {
-      window.alert('1원 이상 정수 금액을 입력해주세요.');
-      return;
+    let nextCustom: number | undefined;
+    if (draftMode === 'CUSTOM') {
+      const n = Number(String(draftCustom).replace(/[^0-9]/g, ''));
+      if (!isFinite(n) || n <= 0) {
+        window.alert('직접 입력 모드에서는 1원 이상 정수 금액을 입력해주세요.');
+        return;
+      }
+      nextCustom = n;
+    } else {
+      // CUSTOM 이 아니면 customAmount 는 미사용이지만 보존
+      const n = Number(String(draftCustom).replace(/[^0-9]/g, ''));
+      nextCustom = isFinite(n) && n > 0 ? n : undefined;
     }
-    saveFundDaily(n);
-    setValue(n);
+    const next: SeveranceFundSetting = {
+      mode: draftMode,
+      customAmount: nextCustom,
+      updatedAt: new Date().toISOString(),
+    };
+    saveFundSetting(next);
+    // backward-compat: 기존 단일 일액 키도 같이 갱신 (legacy 화면 대응)
+    const preview = resolveSeveranceFundDaily({ site: null, globalSetting: next }).fundDaily;
+    saveFundDaily(preview);
+    setSetting(next);
     setEditing(false);
-    window.alert('부금 일액이 저장되었습니다.');
+    window.alert('퇴직공제부금 일액 설정이 저장되었습니다.');
   }
   function resetDefault() {
-    if (!window.confirm(`기본값(${DEFAULT_FUND_DAILY.toLocaleString()}원)으로 되돌릴까요?`)) return;
+    if (!window.confirm('기본값(자동 판단)으로 되돌릴까요?')) return;
+    const next: SeveranceFundSetting = {
+      mode: 'AUTO_BY_SITE_DATE',
+      customAmount: DEFAULT_FUND_DAILY,
+      updatedAt: new Date().toISOString(),
+    };
+    saveFundSetting(next);
     saveFundDaily(DEFAULT_FUND_DAILY);
-    setValue(DEFAULT_FUND_DAILY);
-    setDraft(String(DEFAULT_FUND_DAILY));
+    setSetting(next);
+    setDraftMode('AUTO_BY_SITE_DATE');
+    setDraftCustom(String(DEFAULT_FUND_DAILY));
     setEditing(false);
   }
+
+  const activeMode = editing ? draftMode : setting.mode;
+  const previewDaily = useMemo(() => {
+    if (!editing) return currentDaily;
+    const tmp: SeveranceFundSetting = {
+      mode: draftMode,
+      customAmount: Number(String(draftCustom).replace(/[^0-9]/g, '')) || undefined,
+      updatedAt: setting.updatedAt,
+    };
+    return resolveSeveranceFundDaily({ site: null, globalSetting: tmp }).fundDaily;
+  }, [editing, draftMode, draftCustom, currentDaily, setting.updatedAt]);
 
   return (
     <section className="set-card" style={{ marginTop: 20 }}>
       <header className="set-card__head">
         <div className="set-card__head-left">
-          <h3>퇴직공제부금 일액</h3>
+          <h3>퇴직공제부금 일액 적용 방식</h3>
           <p>
-            건설근로자공제회에 신고·납부하는 일용근로자 퇴직공제부금의 「출역 1일당 금액」입니다.
-            계속근로 1년 미만 근로자에게만 적용되며, 1년 도래 시점부터 신고가 중단되고 법정퇴직금으로 전환됩니다.
+            건설근로자공제회에 신고·납부하는 일용근로자 퇴직공제부금의 「출역 1일당 금액」 결정 방식을 선택합니다.
+            현장별로 별도 모드(<code>severanceFundMode</code>)가 설정된 경우 본 전역 설정보다 우선합니다.
           </p>
         </div>
         <div className="set-card__head-right">
@@ -487,47 +565,166 @@ function MutualAidFundPanel() {
         </div>
       </header>
 
-      <div style={{ padding: '12px 18px 18px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 13, color: '#6b6b73', fontWeight: 600 }}>현재 적용 일액</span>
-          {editing ? (
-            <input
-              type="text"
-              inputMode="numeric"
-              value={draft ? Number(draft.replace(/[^0-9]/g, '') || '0').toLocaleString() : ''}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="6,500"
-              style={{
-                width: 140,
-                height: 36,
-                padding: '0 12px',
-                border: '1px solid #d2d2d7',
-                borderRadius: 8,
-                fontSize: 14,
-                textAlign: 'right',
-                fontVariantNumeric: 'tabular-nums',
-              }}
-            />
-          ) : (
-            <strong style={{ fontSize: 22, color: '#007aff', fontVariantNumeric: 'tabular-nums' }}>
-              {value.toLocaleString()}
-            </strong>
-          )}
-          <span style={{ fontSize: 14, color: '#1c1c1e' }}>원 / 출역일</span>
-        </div>
+      <div style={{ padding: '14px 18px 18px' }}>
+        {/* ── 모드 선택 (4개 카드) ── */}
         <div
           style={{
-            fontSize: 12,
-            color: '#8e8e93',
-            background: '#f5f5f7',
-            padding: '6px 10px',
-            borderRadius: 8,
-            border: '1px solid #e5e5ea',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: 10,
           }}
         >
-          예: 한 달 22일 출역 시 → {(value * 22).toLocaleString()}원
-          <span style={{ marginLeft: 8 }}>· 정책 변경 시 본 화면에서 수정</span>
+          {FUND_MODE_OPTIONS.map((opt) => {
+            const selected = activeMode === opt.value;
+            const disabled = !editing;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => editing && setDraftMode(opt.value)}
+                disabled={disabled}
+                style={{
+                  textAlign: 'left',
+                  padding: '14px 16px',
+                  border: '1.5px solid ' + (selected ? '#007aff' : '#e5e5ea'),
+                  borderRadius: 12,
+                  background: selected ? 'rgba(0,122,255,0.06)' : '#fff',
+                  cursor: disabled ? 'default' : 'pointer',
+                  opacity: disabled && !selected ? 0.55 : 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  transition: 'border-color 120ms, background 120ms',
+                }}
+              >
+                <span style={{ fontSize: 14, fontWeight: 700, color: selected ? '#007aff' : '#1c1c1e' }}>
+                  {opt.label}
+                </span>
+                <span style={{ fontSize: 12, color: '#6b6b73' }}>{opt.sub}</span>
+              </button>
+            );
+          })}
         </div>
+
+        {/* ── CUSTOM 입력 ── */}
+        {activeMode === 'CUSTOM' && (
+          <div
+            style={{
+              marginTop: 14,
+              padding: '12px 14px',
+              border: '1px dashed #c7c7cc',
+              borderRadius: 10,
+              background: '#fafafc',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}
+          >
+            <span style={{ fontSize: 13, color: '#3a3a3c', fontWeight: 600 }}>직접 입력 금액</span>
+            {editing ? (
+              <input
+                type="text"
+                inputMode="numeric"
+                value={
+                  draftCustom
+                    ? Number(draftCustom.replace(/[^0-9]/g, '') || '0').toLocaleString()
+                    : ''
+                }
+                onChange={(e) => setDraftCustom(e.target.value)}
+                placeholder="예: 7,000"
+                style={{
+                  width: 160,
+                  height: 36,
+                  padding: '0 12px',
+                  border: '1px solid #d2d2d7',
+                  borderRadius: 8,
+                  fontSize: 14,
+                  textAlign: 'right',
+                  fontVariantNumeric: 'tabular-nums',
+                }}
+              />
+            ) : (
+              <strong style={{ fontSize: 16, fontVariantNumeric: 'tabular-nums', color: '#1c1c1e' }}>
+                {(setting.customAmount ?? 0).toLocaleString()}
+              </strong>
+            )}
+            <span style={{ fontSize: 13, color: '#1c1c1e' }}>원 / 출역일</span>
+            <span style={{ fontSize: 11, color: '#8e8e93' }}>
+              ※ 시연·예외 케이스 용도. 일반적으로는 자동 판단 또는 공식 일액(6,500 / 8,700) 사용 권장.
+            </span>
+          </div>
+        )}
+
+        {/* ── 미리보기 ── */}
+        <div
+          style={{
+            marginTop: 14,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 16,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 13, color: '#6b6b73', fontWeight: 600 }}>
+              현재 적용 일액 <span style={{ fontSize: 11, color: '#8e8e93' }}>(현장 override 없는 경우)</span>
+            </span>
+            <strong style={{ fontSize: 22, color: '#007aff', fontVariantNumeric: 'tabular-nums' }}>
+              {previewDaily.toLocaleString()}
+            </strong>
+            <span style={{ fontSize: 14, color: '#1c1c1e' }}>원 / 출역일</span>
+          </div>
+          <div
+            style={{
+              fontSize: 12,
+              color: '#8e8e93',
+              background: '#f5f5f7',
+              padding: '6px 10px',
+              borderRadius: 8,
+              border: '1px solid #e5e5ea',
+            }}
+          >
+            예시: 한 달 22일 출역 → {(previewDaily * 22).toLocaleString()}원
+            <span style={{ marginLeft: 8 }}>
+              · 6,500원: {(FUND_DAILY_OLD * 22).toLocaleString()}원 / 8,700원: {(FUND_DAILY_NEW * 22).toLocaleString()}원
+            </span>
+          </div>
+        </div>
+
+        {/* ── 도움말 ── */}
+        <details style={{ marginTop: 14 }}>
+          <summary
+            style={{
+              fontSize: 12,
+              color: '#6b6b73',
+              cursor: 'pointer',
+              padding: '4px 0',
+            }}
+          >
+            ⓘ 일액 결정 우선순위 안내
+          </summary>
+          <ol
+            style={{
+              marginTop: 6,
+              fontSize: 12,
+              color: '#6b6b73',
+              lineHeight: 1.6,
+              paddingLeft: 18,
+            }}
+          >
+            <li>
+              <strong>현장(Site) override</strong> — 현장 상세에서 <code>severanceFundMode</code> 가 설정된 경우 본 전역 설정 무시.
+            </li>
+            <li>
+              <strong>전역 설정 (본 화면)</strong> — 현장 override 가 없으면 본 화면의 모드를 따름.
+            </li>
+            <li>
+              <strong>자동 정책</strong> — 모드가 AUTO 일 때 현장 입찰공고일/도급계약일을 기준으로 6,500 / 8,700 결정.
+              날짜가 모두 누락된 경우 보수적으로 8,700원(신 정책)으로 가정.
+            </li>
+          </ol>
+        </details>
       </div>
     </section>
   );

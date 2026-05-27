@@ -58,6 +58,19 @@ export interface Site {
   createdAt: string;
   geofence?: SiteGeofence;
   attendanceConfirmMode?: 'SITE_OFFICE' | 'HQ_DIRECT';
+
+  /* ─── 법정 계산 추가 필드 (Phase 4) ───────────────────────
+   * 퇴직공제부금 일액 / 4대보험 신고 / 준공 판단에 사용.
+   */
+  constructionStartDate?: string;
+  constructionEndDate?: string;
+  completionDate?: string;
+  constructionAmount?: number;
+  constructionType?: 'NEW_BUILD' | 'EXTENSION' | 'RENOVATION' | 'REPAIR' | 'DEMOLITION' | 'CIVIL' | 'OTHER';
+  severanceApplicable?: boolean;
+  insuranceReportType?: 'GENERAL' | 'CONSTRUCTION_SELF';
+  severanceFundMode?: 'AUTO_BY_SITE_DATE' | 'FORCE_6500' | 'FORCE_8700' | 'CUSTOM';
+  severanceFundCustomAmount?: number;
 }
 
 // ───────── 지오펜싱 ─────────
@@ -102,6 +115,64 @@ export interface CreateSiteRequest {
   siteAgent?: { name?: string; phone?: string };
   safetyOfficer?: { name?: string; phone?: string };
   qualityInspector?: { name?: string; phone?: string };
+
+  /* ─── 법정 계산 추가 필드 (Phase 4) ───────────────────────
+   * 본 필드들은 퇴직공제부금 일액 결정 / 4대보험 신고 / 준공 판단에 사용.
+   */
+  constructionStartDate?: string;
+  constructionEndDate?: string;
+  completionDate?: string;
+  constructionAmount?: number;
+  constructionType?: 'NEW_BUILD' | 'EXTENSION' | 'RENOVATION' | 'REPAIR' | 'DEMOLITION' | 'CIVIL' | 'OTHER';
+  severanceApplicable?: boolean;
+  insuranceReportType?: 'GENERAL' | 'CONSTRUCTION_SELF';
+  geofence?: SiteGeofence;
+  severanceFundMode?: 'AUTO_BY_SITE_DATE' | 'FORCE_6500' | 'FORCE_8700' | 'CUSTOM';
+  severanceFundCustomAmount?: number;
+}
+
+/**
+ * UpdateSiteRequest — PATCH /sites/:id 본문.
+ * 모든 필드 선택적. 부분 업데이트.
+ */
+export interface UpdateSiteRequest {
+  name?: string;
+  contractKind?: ContractKind;
+  contractDescription?: string;
+  contractAmount?: number;
+  contractDate?: string;
+  startDate?: string;
+  endDate?: string;
+  bidNoticeDate?: string;
+  insuranceBaseDate?: string;
+  client?: string;
+  clientType?: string;
+  zipCode?: string;
+  address?: string;
+  addressDetail?: string;
+  manager?: string;
+  managerPhone?: string;
+  managerFax?: string;
+  siteAgent?: { name?: string; phone?: string };
+  safetyOfficer?: { name?: string; phone?: string };
+  qualityInspector?: { name?: string; phone?: string };
+  scale?: 'SMALL' | 'NORMAL';
+  ownerCompanyId?: string;
+  progressPercent?: number;
+  workerCount?: SiteWorkerCount;
+  workDescription?: string;
+  status?: SiteStatus;
+  geofence?: SiteGeofence;
+  attendanceConfirmMode?: 'SITE_OFFICE' | 'HQ_DIRECT';
+  constructionStartDate?: string;
+  constructionEndDate?: string;
+  completionDate?: string;
+  constructionAmount?: number;
+  constructionType?: 'NEW_BUILD' | 'EXTENSION' | 'RENOVATION' | 'REPAIR' | 'DEMOLITION' | 'CIVIL' | 'OTHER';
+  severanceApplicable?: boolean;
+  insuranceReportType?: 'GENERAL' | 'CONSTRUCTION_SELF';
+  severanceFundMode?: 'AUTO_BY_SITE_DATE' | 'FORCE_6500' | 'FORCE_8700' | 'CUSTOM';
+  severanceFundCustomAmount?: number;
 }
 
 export interface ListSitesResponse {

@@ -19,7 +19,24 @@
  *         "양식 빌드 → 사용자가 토탈서비스 업로드" 가 표준 방식.
  */
 
-import ExcelJS from 'exceljs';
+/*
+ * ⚠ TODO(보안 — 실서비스 전환 시):
+ *   xlsx 라이브러리는 HIGH 등급 취약점이 보고됨 (Prototype Pollution / ReDoS).
+ *   실서비스에서는 다음 endpoint 로 서버측 파싱으로 전환:
+ *
+ *     POST /v2/attendance/ecard-compare   (전자카드 비교)
+ *     POST /v2/wage/ledger/parse          (노임대장 파싱)
+ *     POST /v2/wage/ledger/generate       (노임대장 생성)
+ *     POST /v2/attendance/template/build  (출퇴근 양식 빌드)
+ *     POST /v2/insurance/filing/generate  (4대보험 신고서 생성)
+ *     POST /v2/insurance/filing/parse     (4대보험 신고서 파싱)
+ *
+ *   서버는 격리된 환경(예: AWS Lambda + temp directory)에서
+ *   안전한 라이브러리(openpyxl, Apache POI, libreoffice)로 처리.
+ *   클라이언트는 파일 업로드 + 결과만 받음 — xlsx 라이브러리 미사용.
+ */
+
+import type ExcelJSType from 'exceljs';  // 타입만 사용
 
 // ───────── 타입 ─────────
 
@@ -120,8 +137,14 @@ export interface FilingInput {
   /** 1~31 일자별 근로 (1=근로, 0=미근로). 없으면 workDays 앞쪽 채움 */
   daily?: number[];
   workDays: number;
-  /** 보수총액(과세) — 임금총액과 동일하게 처리 */
+  /**
+   * Phase Y5 — 임금총액(= 보수총액의 상한선, 근로기준법 제2조).
+   *  · 노임대장 / 고용보험·산재 신고서 : wageTotal 에 사용 (= 비과세 포함)
+   *  · 국세청 일용근로소득 신고      : taxableGross (과세보수) 가 우선
+   */
   gross: number;
+  /** Phase Y5 — 과세보수 (taxableWage). 미전달 시 gross 로 폴백. */
+  taxableGross?: number;
   incomeTax?: number;
   localTax?: number;
   nontaxable?: number;
@@ -146,13 +169,40 @@ export function buildInsuranceFiling(opts: {
   reportToNts?: boolean;
   defaultDailyHours?: number;
   defaultJobCode?: string;
+  /**
+   * Phase EE3 — strictRrn 모드.
+   *  · true: 13자리 평문 주민번호가 없는 row 발견 시 Error throw (호출자가 try/catch)
+   *  · false (기본값): 해당 row 만 skip + warn (기존 BB2 동작)
+   * 실제 4대보험 신고서 생성(OutputCenterPage 다운로드 버튼) 시 권장값: true.
+   */
+  strictRrn?: boolean;
 }): InsuranceFilingDoc {
   const yymm = opts.yearMonth.replace(/[^0-9]/g, '').slice(0, 6);
   const code = INSURANCE_KIND_CODE[opts.insuranceKind];
   const dailyHours = opts.defaultDailyHours ?? 8;
   const defaultJob = opts.defaultJobCode ?? '013';
+  const strictRrn = opts.strictRrn === true;
 
-  const rows: InsuranceFilingRow[] = opts.rows.map((r) => {
+  // Phase BB2 + EE3 — 13자리 평문 주민번호가 없는 row 처리
+  //   strictRrn=true  → Error throw (신고서 생성 차단, 호출자 alert)
+  //   strictRrn=false → 해당 row 만 skip + warn (기존 동작)
+  const validInputs = opts.rows.filter((r) => {
+    const d = (r.rrn ?? '').replace(/[^0-9]/g, '');
+    if (d.length !== 13) {
+      if (strictRrn) {
+        throw new Error(
+          `buildInsuranceFiling: invalid rrn for ${r.name ?? 'unknown'} (digits=${d.length}) — strictRrn mode`,
+        );
+      }
+      console.warn(
+        `[buildInsuranceFiling] skip row — rrn invalid: name="${r.name ?? 'unknown'}" digits=${d.length}`,
+      );
+      return false;
+    }
+    return true;
+  });
+
+  const rows: InsuranceFilingRow[] = validInputs.map((r) => {
     const days = buildDailyMarks(r);
     const workDays = days.filter(Boolean).length || r.workDays;
     const phoneTokens = splitPhone(r.phone);
@@ -172,14 +222,19 @@ export function buildInsuranceFiling(opts: {
       workDays,
       avgDailyHours: dailyHours,
       baseDays: workDays,
-      payTotal: r.gross ?? 0,
+      // Phase Y5 — 양식별 매핑:
+      //   payTotal  (보수총액·과세) — 국세청/건강/연금 : taxableGross 우선
+      //   wageTotal (임금총액)        — 고용/산재        : gross (임금총액)
+      //   payTotalNts(총지급액 NTS)   — 국세청 일용근로 : taxableGross 우선
+      //   nontaxable (비과세)         — 모든 신고서
+      payTotal: r.taxableGross ?? r.gross ?? 0,
       wageTotal: r.gross ?? 0,
       separationReason: r.separationReason ?? '',
       premiumExempt: '',
       premiumExemptReason: '',
       reportToNts: opts.reportToNts ? 'Y' : '',
       payYearMonth: yymm,
-      payTotalNts: r.gross ?? 0,
+      payTotalNts: r.taxableGross ?? r.gross ?? 0,
       nontaxable: r.nontaxable ?? 0,
       incomeTax: r.incomeTax ?? 0,
       localTax: r.localTax ?? 0,
@@ -237,7 +292,9 @@ export async function downloadInsuranceFilingXlsx(doc: InsuranceFilingDoc): Prom
   if (!res.ok) throw new Error('템플릿 로드 실패: ' + res.status);
   const buf = await res.arrayBuffer();
 
-  const wb = new ExcelJS.Workbook();
+  const ExcelJSMod = (await import('exceljs')).default;
+
+  const wb = new ExcelJSMod.Workbook();
   await wb.xlsx.load(buf);
   const ws = wb.getWorksheet('서식');
   if (!ws) throw new Error('「서식」 시트를 찾을 수 없습니다');
@@ -298,7 +355,8 @@ export async function downloadInsuranceFilingXlsx(doc: InsuranceFilingDoc): Prom
  * 우리 시스템 형식으로 다시 파싱.
  */
 export async function parseInsuranceFilingFile(file: File): Promise<InsuranceFilingDoc> {
-  const wb = new ExcelJS.Workbook();
+  const ExcelJSMod = (await import('exceljs')).default;
+  const wb = new ExcelJSMod.Workbook();
   await wb.xlsx.load(await file.arrayBuffer());
   const ws = wb.getWorksheet('서식') ?? wb.worksheets[0];
   if (!ws) throw new Error('읽을 수 있는 시트가 없습니다');

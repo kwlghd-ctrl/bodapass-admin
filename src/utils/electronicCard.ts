@@ -15,7 +15,24 @@
  *    · UNMATCHED     : 전자카드 태그의 성명이 우리 시스템 워커 명단에 없음
  */
 
-import * as XLSX from 'xlsx';
+/*
+ * ⚠ TODO(보안 — 실서비스 전환 시):
+ *   xlsx 라이브러리는 HIGH 등급 취약점이 보고됨 (Prototype Pollution / ReDoS).
+ *   실서비스에서는 다음 endpoint 로 서버측 파싱으로 전환:
+ *
+ *     POST /v2/attendance/ecard-compare   (전자카드 비교)
+ *     POST /v2/wage/ledger/parse          (노임대장 파싱)
+ *     POST /v2/wage/ledger/generate       (노임대장 생성)
+ *     POST /v2/attendance/template/build  (출퇴근 양식 빌드)
+ *     POST /v2/insurance/filing/generate  (4대보험 신고서 생성)
+ *     POST /v2/insurance/filing/parse     (4대보험 신고서 파싱)
+ *
+ *   서버는 격리된 환경(예: AWS Lambda + temp directory)에서
+ *   안전한 라이브러리(openpyxl, Apache POI, libreoffice)로 처리.
+ *   클라이언트는 파일 업로드 + 결과만 받음 — xlsx 라이브러리 미사용.
+ */
+
+// Runtime XLSX 는 lazy import — 번들 크기 절감을 위해 사용 시점에만 로드
 import type { AttendanceMonth } from '../api/attendance.types';
 import type { TeamMember } from '../api/team.types';
 
@@ -23,7 +40,8 @@ import type { TeamMember } from '../api/team.types';
 
 export type DiffStatus =
   | 'OK'
-  | 'TIME_DIFF'
+  | 'TIME_DIFF'      // 양쪽 모두 시각 있으나 30분 이상 차이
+  | 'MISSING_TIME'   // 한쪽 또는 양쪽에 출/퇴근 시각이 비어 있음 — 검토 필요
   | 'CARD_ONLY'
   | 'FACE_ONLY'
   | 'UNMATCHED';
@@ -32,7 +50,15 @@ export type DiffStatus =
 export interface ECardTag {
   date: string;            // 'YYYY-MM-DD'
   name: string;            // 성명
-  /** 주민번호 앞 6자리(YYMMDD) 추출이 가능했으면 채워둠 */
+  /**
+   * 주민번호 앞 6자리(YYMMDD) 추출이 가능했으면 채워둠.
+   *
+   * 보안 / 개인정보 — TODO(실서비스):
+   *   현재는 시연용으로 프런트가 xlsx 에서 직접 추출하지만,
+   *   실서비스에선 주민번호 원문은 서버에만 두고 프런트는 「토큰화된 birthHash」
+   *   또는 「공제회가 부여한 카드일련번호」만으로 매칭하도록 변경.
+   *   (프런트에서 주민번호 평문을 다루면 개보법·공제회 처리 위탁 규정 위반 위험)
+   */
   birth6?: string;
   /** 'HH:mm' 또는 빈 문자열 */
   inTime: string;
@@ -75,11 +101,20 @@ export interface DiffSummary {
   totalFaceRecords: number;
   matched: number;        // OK
   timeDiff: number;
+  missingTime: number;    // 한쪽 시각만 있는 케이스
   cardOnly: number;
   faceOnly: number;
   unmatched: number;
-  /** 일치율 (%) — matched / (matched + timeDiff + cardOnly + faceOnly) */
+  /**
+   * 일치율 (%) — matched / (matched + timeDiff + missingTime + cardOnly + faceOnly + unmatched).
+   * unmatched 도 분모에 포함시킨다 (미등록 워커도 정합성 평가에 반영).
+   */
   matchRate: number;
+  /**
+   * 미등록 위험률 (%) — unmatched / totalCardTags.
+   * 우리 시스템에 없는 워커가 카드만 찍는 비율 — 부정 출근 의심 지표.
+   */
+  unregisteredRiskRate: number;
 }
 
 /* ─────────── 1. 파서 ─────────── */
@@ -131,11 +166,22 @@ function findHeaderRow(rows: any[][]): { row: number; cols: ColMap } | null {
   return null;
 }
 
+// XLSX.SSF.parse_date_code 의 시뮬레이션 (시리얼 → {y,m,d}) — 동적 import 우회용.
+// 외부 라이브러리 없이도 동작하도록 자체 구현.
+function excelSerialToDate(serial: number): { y: number; m: number; d: number } | null {
+  if (!isFinite(serial) || serial < 1) return null;
+  const utcDays = Math.floor(serial - 25569);
+  const utcMs = utcDays * 86400 * 1000;
+  const dt = new Date(utcMs);
+  if (isNaN(dt.getTime())) return null;
+  return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
+}
+
 function normalizeDate(raw: any): string {
   if (raw == null || raw === '') return '';
   // 엑셀 시리얼 번호일 수 있음
   if (typeof raw === 'number') {
-    const d = XLSX.SSF.parse_date_code(raw);
+    const d = excelSerialToDate(raw);
     if (d && d.y && d.m && d.d) {
       return `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
     }
@@ -178,6 +224,7 @@ function extractBirth6(raw: any): string | undefined {
  * 헤더 행을 자동 탐지하므로 공제회/김반장 양쪽 export 모두 처리 가능.
  */
 export async function parseElectronicCardFile(file: File): Promise<ECardSheet> {
+  const XLSX = await import('xlsx');
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: 'array', cellDates: false });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -250,6 +297,13 @@ export async function parseElectronicCardFile(file: File): Promise<ECardSheet> {
  *  · 1차: 성명 + 주민번호 앞 6자리 (있으면)
  *  · 2차: 성명만 (동명이인이 1명일 때만 인정)
  *  · 매칭 실패 시 workerId 비어 있는 채로 반환 (UNMATCHED 후보)
+ *
+ * TODO(실서비스):
+ *   본 매칭은 클라이언트 시연용. 실서비스에선 서버 endpoint
+ *     POST /v2/attendance/ecard-compare { siteId, yearMonth, sheetTags }
+ *   를 호출해 서버에서 워커 매칭 + 비교를 수행한다. 프런트는 결과만 표시.
+ *   주민번호 원문(idNumberRaw) 을 클라이언트가 접근하면 안 되며,
+ *   서버는 카드 시리얼 / 토큰화된 birthHash 로 매칭한다.
  */
 function matchTagToMember(tag: ECardTag, members: TeamMember[]): TeamMember | null {
   const sameName = members.filter((m) => m.name.replace(/\s/g, '') === tag.name.replace(/\s/g, ''));
@@ -349,6 +403,23 @@ export function compareECardWithAttendance(opts: {
     const name = card?.memberName ?? face?.memberName ?? '(이름 미상)';
 
     if (card && face) {
+      // ★ MISSING_TIME 우선 — 한쪽 또는 양쪽에 출/퇴근 시각이 없으면
+      const cardHasBoth = !!card.inTime && !!card.outTime;
+      const faceHasBoth = !!face.inTime && !!face.outTime;
+      if (!cardHasBoth || !faceHasBoth) {
+        const missing: string[] = [];
+        if (!card.inTime) missing.push('카드 출근');
+        if (!card.outTime) missing.push('카드 퇴근');
+        if (!face.inTime) missing.push('얼굴 출근');
+        if (!face.outTime) missing.push('얼굴 퇴근');
+        rows.push({
+          date, workerId: memberId, name, status: 'MISSING_TIME',
+          card: { inTime: card.inTime, outTime: card.outTime, cardNo: card.cardNo },
+          face: { inTime: face.inTime, outTime: face.outTime, method: face.method },
+          reason: '한쪽 시각 누락 — ' + missing.join(', '),
+        });
+        continue;
+      }
       const dIn  = diffMin(card.inTime, face.inTime);
       const dOut = diffMin(card.outTime, face.outTime);
       const maxDiff = Math.max(dIn ?? 0, dOut ?? 0);
@@ -399,7 +470,7 @@ export function compareECardWithAttendance(opts: {
 
   // 정렬: 일자 → 상태 우선순위(이상치 먼저) → 이름
   const order: Record<DiffStatus, number> = {
-    UNMATCHED: 0, CARD_ONLY: 1, FACE_ONLY: 2, TIME_DIFF: 3, OK: 4,
+    UNMATCHED: 0, CARD_ONLY: 1, FACE_ONLY: 2, MISSING_TIME: 3, TIME_DIFF: 4, OK: 5,
   };
   rows.sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1;
@@ -410,19 +481,25 @@ export function compareECardWithAttendance(opts: {
   // 요약
   const matched = rows.filter((r) => r.status === 'OK').length;
   const timeDiff = rows.filter((r) => r.status === 'TIME_DIFF').length;
+  const missingTime = rows.filter((r) => r.status === 'MISSING_TIME').length;
   const cardOnly = rows.filter((r) => r.status === 'CARD_ONLY').length;
   const faceOnly = rows.filter((r) => r.status === 'FACE_ONLY').length;
   const unmatched = rows.filter((r) => r.status === 'UNMATCHED').length;
-  const denom = matched + timeDiff + cardOnly + faceOnly;
+  // 분모: 미등록까지 포함 — 미등록도 정합성 평가에 반영
+  const denom = matched + timeDiff + missingTime + cardOnly + faceOnly + unmatched;
   const matchRate = denom > 0 ? Math.round((matched / denom) * 1000) / 10 : 0;
+  const unregisteredRiskRate = sheet.tags.length > 0
+    ? Math.round((unmatched / sheet.tags.length) * 1000) / 10
+    : 0;
 
   return {
     rows,
     summary: {
       totalCardTags: sheet.tags.length,
       totalFaceRecords: faceMap.size,
-      matched, timeDiff, cardOnly, faceOnly, unmatched,
+      matched, timeDiff, missingTime, cardOnly, faceOnly, unmatched,
       matchRate,
+      unregisteredRiskRate,
     },
   };
 }
@@ -432,12 +509,14 @@ export function compareECardWithAttendance(opts: {
 const STATUS_LABEL: Record<DiffStatus, string> = {
   OK: '일치',
   TIME_DIFF: '시각 차이',
+  MISSING_TIME: '시각 누락',
   CARD_ONLY: '카드만',
   FACE_ONLY: '얼굴만',
   UNMATCHED: '미등록 근로자',
 };
 
-export function exportDiffToXlsx(rows: DiffRow[], summary: DiffSummary, opts: { siteName?: string; yearMonth?: string }): Blob {
+export async function exportDiffToXlsx(rows: DiffRow[], summary: DiffSummary, opts: { siteName?: string; yearMonth?: string }): Promise<Blob> {
+  const XLSX = await import('xlsx');
   const wb = XLSX.utils.book_new();
 
   // Summary sheet
@@ -453,8 +532,10 @@ export function exportDiffToXlsx(rows: DiffRow[], summary: DiffSummary, opts: { 
     ['시각 차이', summary.timeDiff],
     ['카드만 (얼굴 누락)', summary.cardOnly],
     ['얼굴만 (카드 누락)', summary.faceOnly],
+    ['시각 누락', summary.missingTime],
     ['미등록 근로자', summary.unmatched],
     ['일치율(%)', summary.matchRate],
+    ['미등록 위험률(%)', summary.unregisteredRiskRate],
   ];
   const sumWs = XLSX.utils.aoa_to_sheet(summaryRows);
   XLSX.utils.book_append_sheet(wb, sumWs, '요약');
@@ -481,3 +562,38 @@ export function exportDiffToXlsx(rows: DiffRow[], summary: DiffSummary, opts: { 
 }
 
 export const STATUS_LABELS = STATUS_LABEL;
+
+
+/* ─────────── 서버측 처리 API 타입 (실서비스 전환용) ─────────── */
+
+/**
+ * 서버측 전자카드 비교 endpoint — 실서비스 전환 시 사용.
+ *
+ *  POST /v2/attendance/ecard-compare
+ *
+ * 프런트가 xlsx 를 직접 파싱·매칭하지 않고, 서버가 모든 매칭 로직을 수행한다.
+ * 주민번호 원문 처리, 워커 매칭, 시각 비교 모두 서버 책임.
+ *
+ * 장점:
+ *  · 주민번호 원문이 프런트에 노출되지 않음 (개인정보보호법 준수)
+ *  · 동명이인·외국인등록번호 등 복잡한 매칭 로직을 서버에서 일관 처리
+ *  · 비교 결과가 서버 감사로그에 기록되어 추적 가능
+ */
+export interface ECardCompareRequest {
+  siteId: string;
+  yearMonth: string;
+  /** xlsx 파일 업로드 후 발급된 uploadId — 또는 base64 직접 전송도 가능 */
+  fileUploadId?: string;
+  fileBase64?: string;
+  /** 시각 차이 허용 범위 — 기본 30분 */
+  toleranceMinutes?: number;
+}
+
+export interface ECardCompareResponse {
+  rows: DiffRow[];
+  summary: DiffSummary;
+  /** 파싱한 카드 시트 메타 (현장명·연월 추정 등) */
+  sheet: Omit<ECardSheet, 'tags'>;
+  /** 감사로그 ID — 비교 작업 기록 */
+  auditLogId: string;
+}

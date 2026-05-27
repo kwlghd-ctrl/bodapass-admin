@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { WageLedgerPanel } from '../components/legal/WageLedgerPanel';
+import { SettleStatusBadge } from './wage/components/SettleStatusBadge';
+import { WageStepper } from './wage/components/WageStepper';
 import { localYearMonth } from '../utils/dateLocal';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
@@ -19,24 +22,43 @@ import { getErrorMessage } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { computeWorkCloseProgress } from '../utils/workCloseProgress';
 import { openPrintWindow } from '../utils/printDoc';
-import { buildBulkPayslipHtml, buildLaborReportHtml } from '../utils/payrollDocs';
 import { appendDispatchLog } from '../utils/messageTemplates';
 import {
-  buildLedgerFromWage,
   downloadLedgerXlsx,
   appendToArchive,
 } from '../utils/wageLedger';
 import type { LedgerDoc } from '../utils/wageLedger';
+import {
+  buildPayslipHtmlFromReport,
+  buildLaborReportHtmlFromReport,
+  buildLedgerFromReport,
+} from './wage/services/exportPayrollDocs';
 import './WagePage.css';
 
 import { MacSelect } from '../components/MacSelect';
 import { ElectronicCardCompare } from '../components/ElectronicCardCompare';
 import {
   classifyForSeverance,
-  loadFundDaily,
+  loadFundSetting,
+  resolveSeveranceFundDaily,
   mutualAidAccrued,
   legalSeverance,
 } from '../utils/severance';
+import { UI_LABEL_TEXT } from '../utils/legalDataValidation';
+import {
+  krw,
+  krwShort,
+  aggregateByRole,
+  mergeWage,
+  mergeSeverance,
+} from './wage/utils/wageUtils';
+import { MonthPicker } from './wage/components/MonthPicker';
+import { PayslipIssueDialog } from './wage/components/PayslipIssueDialog';
+import { InsCell } from './wage/components/InsCell';
+import { WageReviewRow } from './wage/components/WageReviewRow';
+import { SeveranceHero } from './wage/components/SeveranceHero';
+import { SeveranceTab } from './wage/components/SeveranceTab';
+import { prepareReportRows } from './wage/services/reportGate';
 type Tab = 'wage' | 'severance';
 
 /**
@@ -287,6 +309,10 @@ export function WagePage({ defaultTab = 'wage' }: { defaultTab?: Tab } = {}) {
         />
       )}
 
+      {tab === 'wage' && (
+        <WageLedgerPanel siteId={focusedSiteId ?? siteId} yearMonth={yearMonth} />
+      )}
+
       {(() => {
         // focusedSiteId 가 있으면 해당 site 의 wage 만, 없으면 전체 합계
         const effectiveWage = focusedSiteId && wagePerSite[focusedSiteId]
@@ -344,9 +370,13 @@ export function WagePage({ defaultTab = 'wage' }: { defaultTab?: Tab } = {}) {
         }
         if (tab === 'severance') {
           const compareSiteId = focusedSiteId ?? (siteId === 'ALL' ? null : siteId);
+          // 현장 한 곳에 포커스된 경우 해당 사이트의 severanceFundMode override 를 적용.
+          // siteId === 'ALL' 이면 전역 설정 사용 (site=null).
+          const activeSite =
+            siteId !== 'ALL' ? sites.find((s) => s.id === siteId) ?? null : null;
           return (
             <>
-              <SeveranceHero data={sev} />
+              <SeveranceHero data={sev} site={activeSite} />
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0', flexWrap: 'wrap' }}>
                 <div style={{ minWidth: 220, maxWidth: 360 }}>
                   <MacSelect
@@ -383,7 +413,7 @@ export function WagePage({ defaultTab = 'wage' }: { defaultTab?: Tab } = {}) {
                   </span>
                 )}
               </div>
-              <SeveranceTab data={sev} />
+              <SeveranceTab data={sev} site={activeSite} />
               <ElectronicCardCompare
                 siteId={compareSiteId}
                 yearMonth={yearMonth}
@@ -736,55 +766,7 @@ function WageOverviewHeader({
  *   ④ 명세서발행     = wageStage PAID  (지급과 함께 발행)
  *   ⑤ 마감           = wageStage SETTLED
  */
-function WageStepper({
-  monthClose,
-  isAllMode,
-}: {
-  monthClose: MonthClose | null;
-  isAllMode: boolean;
-}) {
-  const att = monthClose?.attStage ?? 'OPEN';
-  const wage = monthClose?.wageStage ?? 'OPEN';
-
-  const steps: Array<{ label: string; done: boolean; current?: boolean }> = [
-    { label: '출역확정(월)', done: att === 'HQ_CONFIRMED' },
-    { label: '노무비 확정',  done: wage === 'HQ_CONFIRMED' || wage === 'PAID' || wage === 'SETTLED' },
-    { label: '지급',          done: wage === 'PAID' || wage === 'SETTLED' },
-    { label: '명세서발행',    done: wage === 'PAID' || wage === 'SETTLED' },
-    { label: '마감',          done: wage === 'SETTLED' },
-  ];
-
-  // 현재 단계 = 가장 마지막 done의 다음 항목
-  const currentIdx = steps.findIndex((s) => !s.done);
-  if (currentIdx >= 0) steps[currentIdx].current = true;
-
-  return (
-    <section className="wage-stepper">
-      <header className="wage-stepper__head">
-        <h3 className="wage-stepper__title">정산 진행</h3>
-        {isAllMode && (
-          <span className="wage-stepper__hint">전체 모드 — 단일 현장 선택 시 진행도 표시</span>
-        )}
-      </header>
-      <ol className={'wage-stepper__list' + (isAllMode ? ' is-disabled' : '')}>
-        {steps.map((s, i) => (
-          <li
-            key={s.label}
-            className={
-              'wage-stepper__step' +
-              (s.done ? ' is-done' : '') +
-              (s.current ? ' is-current' : '')
-            }
-          >
-            <span className="wage-stepper__num">{s.done ? '✓' : i + 1}</span>
-            <span className="wage-stepper__label">{s.label}</span>
-            {i < steps.length - 1 && <span className="wage-stepper__line" aria-hidden />}
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
+// Phase Z3: WageStepper 분리 — src/pages/wage/components/WageStepper.tsx
 
 /* ────────────────── ③ 검토 필요 (5타일) ────────────────── */
 /**
@@ -792,44 +774,6 @@ function WageStepper({
  *
  *  실 운영 시 출역·계약·보험 데이터에서 산출. 현재는 wage rows 기반 mock 카운트.
  */
-function WageReviewRow({ wage }: { wage: WageMonthSummary | null }) {
-  // mock 카운트 — 실 운영 시 별도 API 호출
-  const total = wage?.rows.length ?? 0;
-  const tiles = [
-    { key: 'manual',      label: '수동보정',     value: Math.max(0, Math.round(total * 0.05)) },
-    { key: 'no-contract', label: '계약미체결',   value: Math.max(0, Math.round(total * 0.04)) },
-    { key: 'no-consent',  label: '동의미완료',   value: Math.max(0, Math.round(total * 0.03)) },
-    { key: 'no-ins',      label: '보험정보누락', value: Math.max(0, Math.round(total * 0.06)) },
-    { key: 'no-out',      label: '퇴근누락',     value: Math.max(0, Math.round(total * 0.02)) },
-  ];
-
-  return (
-    <section className="wage-review">
-      <header className="wage-review__head">
-        <h3 className="wage-review__title">검토 필요</h3>
-        <p className="wage-review__sub">정산 전에 확인이 필요한 항목입니다. 클릭 시 대상자 목록.</p>
-      </header>
-      <div className="wage-review__tiles">
-        {tiles.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            className={'wage-review__tile' + (t.value > 0 ? ' has-value' : ' is-clean')}
-            onClick={() =>
-              window.alert(`「${t.label}」 ${t.value}건 — 대상자 목록 (mock).`)
-            }
-            title={`${t.label} 대상자 보기`}
-          >
-            <span className="wage-review__tile-label">{t.label}</span>
-            <strong className="wage-review__tile-value">{t.value}</strong>
-            <span className="wage-review__tile-unit">건</span>
-          </button>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 /* ────────────────── 현장별 요약 테이블 (전체 모드) ────────────────── */
 
 function PerSiteSummaryTable({
@@ -901,7 +845,12 @@ function PerSiteSummaryTable({
    *  - 집행율(%)     = 인건비 집행 / 인건비 예산
    *  - 4대보험 집행 (사용자 부담분 추정):
    *      국민연금 4.5% / 건강보험 3.545% / 고용보험 0.9% / 산재보험 0.93%
-   *  - 퇴직공제부금  = 인건비 집행 × 0.5% (건설근로자공제회 적립)
+   *
+   *  퇴직공제부금 — 「인건비 × 0.5%」 방식은 사용 금지 (Phase O1).
+   *  반드시 severanceWorkDays × appliedDailyFund 로 계산하며,
+   *  화면 표시는 SeveranceHero / SeveranceTab 또는 별도 KPI 컴포넌트에서
+   *  resolveSeveranceFundDaily / calculateSeveranceFund 결과를 사용한다.
+   *
    * 실 운영 시엔 회계 시스템에서 가져온 정확한 값을 표시.
    */
   const enriched = modeFilteredRows.map((r) => {
@@ -909,8 +858,11 @@ function PerSiteSummaryTable({
     const progress = (r.site.progressPercent ?? 0) / 100;
     const laborSpent = Math.round(laborBudget * progress); // 누적
     const laborMonthly = r.totalPay;                        // 이번 달 실제 지급액
-    // 사용자 부담률
-    const RATES = { pension: 0.045, health: 0.03545, employ: 0.009, accident: 0.0093, retireFund: 0.005 };
+    // Display-only 예산 추정용 사용자 부담률 (4대보험 사업주 부담 약식).
+    // 실 인건비 명세 계산은 calculateSocialInsurance() from src/domain/socialInsurance 사용.
+    // 본 RATES 는 도급금액×0.35×rate 형태의 예산 KPI 카드 표기 전용이며,
+    // 개별 근로자 공제액 산정에 절대 사용하지 않는다.
+    const RATES = { pension: 0.045, health: 0.03545, employ: 0.009, accident: 0.0093 };
     const mk = (rate: number) => ({
       budget: Math.round(laborBudget * rate),
       spent: Math.round(laborBudget * rate * progress),     // 누적
@@ -920,11 +872,10 @@ function PerSiteSummaryTable({
     const health = mk(RATES.health);
     const employ = mk(RATES.employ);
     const accident = mk(RATES.accident);
-    const retireFund = mk(RATES.retireFund);
     const execRate = laborBudget > 0 ? Math.round((laborSpent / laborBudget) * 100) : 0;
     return {
       ...r, laborBudget, laborSpent, laborMonthly,
-      pension, health, employ, accident, retireFund,
+      pension, health, employ, accident,
       execRate,
     };
   });
@@ -996,6 +947,9 @@ function PerSiteSummaryTable({
             마감 <strong>{totals.closedCount}</strong>/{enriched.length}
             · 인건비 <strong>{krwShort(totals.laborSpent)}/{krwShort(totals.laborBudget)}</strong>
             · 집행율 <strong>{totalExecRate}%</strong>
+            <span style={{ fontSize: 11, color: '#cc7700', marginLeft: 8 }}>
+              ※ 예산 추정용 (실 4대보험 계산값 아님)
+            </span>
           </span>
         </span>
       </header>
@@ -1119,7 +1073,11 @@ function PerSiteSummaryTable({
               <span className="wage-detail__value">{detailFor.employ.toLocaleString()}원</span>
             </li>
             <li className="wage-detail__row">
-              <span className="wage-detail__label">산재보험</span>
+              <span className="wage-detail__label">산재보험 (근로자 공제)</span>
+              <span className="wage-detail__value">0원 <em style={{ color: '#999', fontStyle: 'normal' }}>(사업주 100% 부담)</em></span>
+            </li>
+            <li className="wage-detail__row">
+              <span className="wage-detail__label">산재보험 (사업주 부담)</span>
               <span className="wage-detail__value">{detailFor.accident.toLocaleString()}원</span>
             </li>
             <li className="wage-detail__row">
@@ -1179,37 +1137,7 @@ function PerSiteSummaryTable({
  *  마. 명세서발행         ← payslipsIssuedAt 존재
  *  바. 마감               ← wageStage SETTLED
  */
-function SettleStatusBadge({ monthClose }: { monthClose: MonthClose | null }) {
-  const att = monthClose?.attStage ?? 'OPEN';
-  const wage = monthClose?.wageStage ?? 'OPEN';
-  const payslipsIssued = !!monthClose?.payslipsIssuedAt;
-  const steps: Array<{ label: string; done: boolean }> = [
-    { label: '현장 출역확정(월)', done: att === 'SITE_CLOSED' || att === 'HQ_CONFIRMED' },
-    { label: '본사 출역확정',     done: att === 'HQ_CONFIRMED' },
-    { label: '노무비확정',  done: wage === 'HQ_CONFIRMED' || wage === 'PAID' || wage === 'SETTLED' },
-    { label: '지급완료',           done: wage === 'PAID' || wage === 'SETTLED' },
-    { label: '명세서발행',         done: payslipsIssued || wage === 'SETTLED' },
-    { label: '마감',               done: wage === 'SETTLED' },
-  ];
-  const currentIdx = steps.findIndex((s) => !s.done);
-  return (
-    <div className="settle-mini" role="img" aria-label={`진행: ${steps.map((s, i) => `${i + 1}.${s.label}${s.done ? '✓' : ''}`).join(' / ')}`}>
-      {steps.map((s, i) => (
-        <span
-          key={s.label}
-          className={
-            'settle-mini__step'
-            + (s.done ? ' is-done' : '')
-            + (i === currentIdx ? ' is-current' : '')
-          }
-        >
-          <span className="settle-mini__dot">{s.done ? '✓' : i + 1}</span>
-          <span className="settle-mini__label">{s.label}</span>
-        </span>
-      ))}
-    </div>
-  );
-}
+// Phase Z3: SettleStatusBadge 분리 — src/pages/wage/components/SettleStatusBadge.tsx
 
 /**
  * 마감 워크플로우 셀 (4단계 상태기계)
@@ -1507,26 +1435,6 @@ function WageWorkflowButtons({
   );
 }
 
-function InsCell({ monthly, spent, budget }: { monthly: number; spent: number; budget: number }) {
-  const rate = budget > 0 ? Math.round((spent / budget) * 100) : 0;
-  const cls = rate >= 90 ? 'is-warn' : rate >= 60 ? 'is-mid' : 'is-low';
-  return (
-    <div className="ins-cell">
-      <div className="ins-cell__monthly">
-        <em>월</em>
-        <strong>{krw(monthly)}</strong>
-      </div>
-      <div className="ins-cell__bar">
-        <span className={'ins-cell__bar-fill ' + cls} style={{ width: Math.min(100, rate) + '%' }} />
-      </div>
-      <div className="ins-cell__cumul">
-        <span>누적 {krwShort(spent)}/{krwShort(budget)}</span>
-        <span className={'ins-cell__rate ' + cls}>{rate}%</span>
-      </div>
-    </div>
-  );
-}
-
 /* ────────────────── 노임비 탭 ────────────────── */
 
 type WageSortKey = 'name' | 'role' | 'workDays' | 'dailyWage' | 'baseAmount' | 'deductionTotal' | 'netAmount';
@@ -1614,22 +1522,38 @@ function WageTab({
     );
   }, [filteredRows]);
 
-  function printPayslips(rows: WageRow[], summary: WageMonthSummary, ym: string) {
-    if (rows.length === 0) return;
-    const html = buildBulkPayslipHtml({ rows, yearMonth: ym, company: companyInfo, site: siteInfo });
+  /**
+   * Phase BB1 — printPayslips 도 boolean 을 반환한다.
+   * 검증 실패 시 false 를 반환해 호출자가 "발급 모달 close" 를 차단할 수 있도록 한다.
+   */
+  function printPayslips(rows: WageRow[], summary: WageMonthSummary, ym: string): boolean {
+    if (rows.length === 0) return false;
+    // Phase Y1 — filteredSummary 로 출력 (BLOCKED row 제외 후 검증 통과한 reportRows)
+    const reportRows = prepareReportRows(rows);
+    if (!reportRows) return false;
+    void summary;
+    const html = buildPayslipHtmlFromReport(reportRows, ym, companyInfo, siteInfo);
     openPrintWindow({
-      title: `임금명세서 ${ym} (${rows.length}명)`,
+      title: `임금명세서 ${ym} (${reportRows.length}명)`,
       bodyHtml: html,
     });
+    return true;
   }
+  /**
+   * Phase Y2 — dispatchPayslips 는 boolean 을 반환한다.
+   * 검증 실패 시 false 를 반환해 호출자가 "발송됐습니다" alert 를 차단할 수 있도록 한다.
+   */
   function dispatchPayslips(
     rows: WageRow[],
     summary: WageMonthSummary,
     channel: 'KAKAO' | 'SMS',
-  ) {
-    if (rows.length === 0) return;
+  ): boolean {
+    if (rows.length === 0) return false;
+    // Phase Y1/Y2 — prepareReportRows 로 BLOCKED row 제외 + 검증. 실패 시 false.
+    const reportRows = prepareReportRows(rows);
+    if (!reportRows) return false;
     const now = new Date().toISOString();
-    rows.forEach((r) => {
+    reportRows.forEach((r) => {
       appendDispatchLog({
         id: 'DSP-PS-' + Date.now().toString(36) + '-' + r.memberId,
         channel,
@@ -1641,10 +1565,14 @@ function WageTab({
         status: 'SENT',
       });
     });
+    return true;
   }
 
   function issueLaborReport(summary: WageMonthSummary) {
-    const html = buildLaborReportHtml({ data: summary, company: companyInfo, site: siteInfo });
+    // Phase Y1 — filteredSummary 로 출력
+    const reportRows = prepareReportRows(summary.rows);
+    if (!reportRows) return;
+    const html = buildLaborReportHtmlFromReport(reportRows, summary, companyInfo, siteInfo);
     openPrintWindow({
       title: `근로내용확인신고서 ${summary.year}-${String(summary.month).padStart(2, '0')}`,
       bodyHtml: html,
@@ -1654,16 +1582,22 @@ function WageTab({
 
   /* ── 노임대장 다운로드 핸들러 (업로드는 출퇴근 현황으로 이전) ── */
   function buildLedger(summary: WageMonthSummary): LedgerDoc {
-    return buildLedgerFromWage({
+    // Phase II2 — buildLedgerFromReport service wrapper 사용
+    return buildLedgerFromReport(
+      summary.rows,
       summary,
-      site: currentSite ?? null,
-      companyName: companyInfo.companyName,
-      managerName: companyInfo.representative,
-    });
+      currentSite ?? null,
+      companyInfo.companyName,
+      companyInfo.representative,
+    );
   }
 
   async function ledgerDownloadXlsx(summary: WageMonthSummary) {
-    const doc = buildLedger(summary);
+    // Phase Y1 — filteredSummary 로 노임대장 생성
+    const reportRows = prepareReportRows(summary.rows);
+    if (!reportRows) return;
+    const filteredSummary = { ...summary, rows: reportRows };
+    const doc = buildLedger(filteredSummary);
     appendToArchive(doc);
     try {
       await downloadLedgerXlsx(doc);
@@ -1781,7 +1715,7 @@ function WageTab({
                 <th>국민연금</th>
                 <th>건강보험</th>
                 <th>고용보험</th>
-                <th>산재보험</th>
+                <th>산재(사업주)</th>
                 <th>소득세</th>
                 <th>지방세</th>
                 <WageSortTh label="공제계" col="deductionTotal" cur={sortKey} dir={sortDir} on={toggleSort} numeric />
@@ -1801,7 +1735,7 @@ function WageTab({
                   <td className="wage-table__num">{r.deductionPension.toLocaleString()}</td>
                   <td className="wage-table__num">{r.deductionHealth.toLocaleString()}</td>
                   <td className="wage-table__num">{r.deductionEmployment.toLocaleString()}</td>
-                  <td className="wage-table__num">{r.deductionAccident.toLocaleString()}</td>
+                  <td className="wage-table__num">{(r.industrialAccidentInsurance ?? 0).toLocaleString()}</td>
                   <td className="wage-table__num">{r.deductionIncomeTax.toLocaleString()}</td>
                   <td className="wage-table__num">{r.deductionLocalTax.toLocaleString()}</td>
                   <td className="wage-table__num wage-table__num--ded">{r.deductionTotal.toLocaleString()}</td>
@@ -1834,9 +1768,19 @@ function WageTab({
           count={filteredRows.length}
           yearMonth={yearMonth}
           onClose={() => setIssueOpen(false)}
-          onPrint={() => { printPayslips(filteredRows, data, yearMonth); setIssueOpen(false); }}
-          onKakao={() => { dispatchPayslips(filteredRows, data, 'KAKAO'); window.alert(`${filteredRows.length}명에게 카카오톡으로 임금명세서 발송됐습니다.`); setIssueOpen(false); }}
-          onSms={() => { dispatchPayslips(filteredRows, data, 'SMS'); window.alert(`${filteredRows.length}명에게 SMS로 임금명세서 발송됐습니다.`); setIssueOpen(false); }}
+          onPrint={() => { const ok = printPayslips(filteredRows, data, yearMonth); if (!ok) return; setIssueOpen(false); }}
+          onKakao={() => {
+            const ok = dispatchPayslips(filteredRows, data, 'KAKAO');
+            if (!ok) return;
+            window.alert(`${filteredRows.length}명에게 카카오톡으로 임금명세서 발송됐습니다.`);
+            setIssueOpen(false);
+          }}
+          onSms={() => {
+            const ok = dispatchPayslips(filteredRows, data, 'SMS');
+            if (!ok) return;
+            window.alert(`${filteredRows.length}명에게 SMS로 임금명세서 발송됐습니다.`);
+            setIssueOpen(false);
+          }}
         />
       )}
     </>
@@ -1844,299 +1788,10 @@ function WageTab({
 }
 
 /** 임금명세서 발행 — 출력 / 카톡 / SMS 선택 모달 */
-function PayslipIssueDialog({
-  count,
-  yearMonth,
-  onClose,
-  onPrint,
-  onKakao,
-  onSms,
-}: {
-  count: number;
-  yearMonth: string;
-  onClose: () => void;
-  onPrint: () => void;
-  onKakao: () => void;
-  onSms: () => void;
-}) {
-  const options: Array<{
-    icon: string;
-    label: string;
-    sub: string;
-    onClick: () => void;
-  }> = [
-    { icon: '🖨', label: '출력', sub: 'PDF 새 창 → 인쇄', onClick: onPrint },
-    { icon: '💬', label: '카카오톡', sub: '등록된 연락처로 일괄 발송', onClick: onKakao },
-    { icon: '📱', label: 'SMS', sub: '카톡 미가입자 대비 일괄 발송', onClick: onSms },
-  ];
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title="임금명세서 일괄 발행"
-      subtitle={`${yearMonth} · 대상 ${count}명`}
-      width={520}
-    >
-      <p className="payslip-dlg__hint">
-        선택한 방식으로 임금명세서를 일괄 발행/발송합니다.
-      </p>
-      <div className="payslip-dlg__grid">
-        {options.map((o) => (
-          <button
-            key={o.label}
-            type="button"
-            className="payslip-dlg__opt"
-            onClick={o.onClick}
-          >
-            <span className="payslip-dlg__opt-icon" aria-hidden>{o.icon}</span>
-            <span className="payslip-dlg__opt-label">{o.label}</span>
-            <span className="payslip-dlg__opt-sub">{o.sub}</span>
-          </button>
-        ))}
-      </div>
-    </Modal>
-  );
-}
 
 /* ────────────────── 퇴직공제 히어로 (KPI 4타일) ────────────────── */
 
-function SeveranceHero({ data }: { data: SeveranceMonthSummary | null }) {
-  if (!data) return null;
 
-  const fundDaily = loadFundDaily();
-  const refDate = new Date(data.year, data.month, 0);
-
-  let mutualCount = 0, legalCount = 0, approachingCount = 0;
-  let mutualTotal = 0, legalTotal = 0;
-  for (const r of data.rows) {
-    const cls = classifyForSeverance(r.joinedAt, refDate);
-    if (cls.group === 'LEGAL') {
-      legalCount++;
-      legalTotal += legalSeverance({ avgDailyWage: r.dailyWage, serviceDays: cls.tenure.totalDays });
-    } else {
-      mutualCount++;
-      mutualTotal += mutualAidAccrued({ workDays: r.totalWorkDays, fundDaily });
-      if (cls.tenure.isApproachingOneYear) approachingCount++;
-    }
-  }
-
-  const tiles = ([
-    { key: 'today',  label: '당일 출력 인원',     raw: <><b>{data.attendedToday}</b>명</>,                          tone: 'plain' as const },
-    { key: 'mutual', label: '공제회 부금 누적',   raw: <><b>{krw(mutualTotal)}</b> · {mutualCount}명</>,           tone: 'info'  as const },
-    { key: 'legal',  label: '법정퇴직금 대상',    raw: <><b>{legalCount}</b>명 · {krw(legalTotal)}</>,             tone: 'ok'    as const },
-    { key: 'soon',   label: '1년 임박 (≤30일)',  raw: <><b>{approachingCount}</b>명</>,                            tone: 'plain' as const },
-  ]);
-
-  return (
-    <div className="att-daily-kpi att-daily-kpi--notif">
-      {tiles.map((s, i) => (
-        <button key={i} type="button" className={'att-hero__tile att-hero__tile--' + s.tone}>
-          <span className="att-hero__icon" aria-hidden>
-            <svg viewBox="0 0 36 36" width="36" height="36">
-              <rect x="0.5" y="0.5" width="35" height="35" rx="8" fill="#FAFAFA" stroke="#E5E7EB" />
-              <g stroke="#D1D5DB" strokeWidth="0.5">
-                <line x1="0" y1="9"  x2="36" y2="9" />
-                <line x1="0" y1="18" x2="36" y2="18" />
-                <line x1="0" y1="27" x2="36" y2="27" />
-                <line x1="9"  y1="0" x2="9"  y2="36" />
-                <line x1="18" y1="0" x2="18" y2="36" />
-                <line x1="27" y1="0" x2="27" y2="36" />
-              </g>
-              <circle cx="18" cy="18" r="6" fill="none" stroke="#9CA3AF" strokeWidth="0.6" />
-              <circle cx="18" cy="18" r="1.2" fill="#9CA3AF" />
-            </svg>
-          </span>
-          <span className="att-hero__body">
-            <strong className="att-hero__title">{s.label}</strong>
-            <span className="att-hero__sub">{s.raw}</span>
-          </span>
-          <span className="att-hero__time">월</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function SeveranceTab({ data }: { data: SeveranceMonthSummary | null }) {
-  if (!data) return null;
-  if (data.rows.length === 0) {
-    return <div className="wage__empty card">해당 현장에 등록된 팀원이 없습니다.</div>;
-  }
-
-  const fundDaily = loadFundDaily();
-  // 기준일: data.year/month 의 말일 — 그 시점 기준 계속근로 판정
-  const refDate = new Date(data.year, data.month, 0);
-
-  // 분류
-  type Classified = (typeof data.rows)[number] & {
-    group: 'MUTUAL_AID' | 'LEGAL';
-    tenureLabel: string;
-    daysUntilOneYear: number;
-    totalDays: number;
-    /** 산출 금액 (그룹별 의미가 다름) */
-    computedAmount: number;
-    isApproachingOneYear: boolean;
-  };
-  const classified: Classified[] = data.rows.map((r) => {
-    const cls = classifyForSeverance(r.joinedAt, refDate);
-    const computedAmount = cls.group === 'LEGAL'
-      ? legalSeverance({ avgDailyWage: r.dailyWage, serviceDays: cls.tenure.totalDays })
-      : mutualAidAccrued({ workDays: r.totalWorkDays, fundDaily });
-    return {
-      ...r,
-      group: cls.group,
-      tenureLabel: cls.label,
-      daysUntilOneYear: cls.tenure.daysUntilOneYear,
-      totalDays: cls.tenure.totalDays,
-      computedAmount,
-      isApproachingOneYear: cls.tenure.isApproachingOneYear,
-    };
-  });
-
-  const mutualRows = classified.filter((r) => r.group === 'MUTUAL_AID');
-  const legalRows = classified.filter((r) => r.group === 'LEGAL');
-  const approachingRows = classified.filter((r) => r.isApproachingOneYear);
-
-  const mutualTotal = mutualRows.reduce((s, r) => s + r.computedAmount, 0);
-  const legalTotal = legalRows.reduce((s, r) => s + r.computedAmount, 0);
-
-  return (
-    <>
-      {approachingRows.length > 0 && (
-        <section
-          className="card"
-          style={{
-            padding: '12px 16px',
-            background: '#fff8ec',
-            border: '1px solid #ffd9a3',
-            color: '#7a4a00',
-            fontSize: 13,
-            margin: '12px 0',
-            borderRadius: 12,
-          }}
-        >
-          ⚠ 30일 이내 만 1년 도래 예정 — {approachingRows.map((r) => `${r.memberName}(D-${r.daysUntilOneYear})`).join(', ')}.
-          이 시점부터 공제회 신고를 중단하고 법정퇴직금으로 전환하셔야 합니다.
-        </section>
-      )}
-
-      <section className="wage__grid card">
-        <h3>
-          1년 미만 — 퇴직공제부금 ({data.year}.{String(data.month).padStart(2, '0')})
-          <span style={{ fontSize: 12, fontWeight: 400, color: '#6b6b73', marginLeft: 8 }}>
-            출역일 × 부금 일액 ({fundDaily.toLocaleString()}원/일)
-          </span>
-        </h3>
-        {mutualRows.length === 0 ? (
-          <div style={{ padding: '20px', textAlign: 'center', color: '#8e8e93', fontSize: 13 }}>
-            1년 미만 근로자가 없습니다.
-          </div>
-        ) : (
-          <div className="wage__grid-scroll">
-            <table className="wage-table wage-table--wide">
-              <thead>
-                <tr>
-                  <th>번호</th>
-                  <th>성명</th>
-                  <th>직종</th>
-                  <th>입사일</th>
-                  <th className="wage-table__num">계속근로</th>
-                  <th className="wage-table__num">총 출역일</th>
-                  <th className="wage-table__num">부금 일액</th>
-                  <th className="wage-table__num">누적 부금</th>
-                  <th>상태</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mutualRows.map((r, i) => (
-                  <tr key={r.memberId} style={r.isApproachingOneYear ? { background: '#fff8ec' } : undefined}>
-                    <td>{i + 1}</td>
-                    <td className="wage-table__name">{r.memberName}</td>
-                    <td>{r.role}</td>
-                    <td className="wage-table__mono">{r.joinedAt.slice(0, 10)}</td>
-                    <td className="wage-table__num">{Math.max(0, r.totalDays)}일</td>
-                    <td className="wage-table__num">{r.totalWorkDays}</td>
-                    <td className="wage-table__num">{fundDaily.toLocaleString()}</td>
-                    <td className="wage-table__num wage-table__num--net">{r.computedAmount.toLocaleString()}</td>
-                    <td style={{ fontSize: 12, color: r.isApproachingOneYear ? '#c75c00' : '#6b6b73' }}>
-                      {r.isApproachingOneYear ? `D-${r.daysUntilOneYear} 임박` : `D-${Math.max(0, r.daysUntilOneYear)}`}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td colSpan={5}>합계 ({mutualRows.length}명)</td>
-                  <td className="wage-table__num">{mutualRows.reduce((s, r) => s + r.totalWorkDays, 0)}</td>
-                  <td></td>
-                  <td className="wage-table__num wage-table__num--net">{mutualTotal.toLocaleString()}</td>
-                  <td></td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <section className="wage__grid card" style={{ marginTop: 16 }}>
-        <h3>
-          1년 이상 — 법정퇴직금 ({data.year}.{String(data.month).padStart(2, '0')})
-          <span style={{ fontSize: 12, fontWeight: 400, color: '#6b6b73', marginLeft: 8 }}>
-            평균임금 × 30일 × (계속근로일수 ÷ 365) — 평균임금은 일당으로 추정
-          </span>
-        </h3>
-        {legalRows.length === 0 ? (
-          <div style={{ padding: '20px', textAlign: 'center', color: '#8e8e93', fontSize: 13 }}>
-            1년 이상 계속근로자가 없습니다.
-          </div>
-        ) : (
-          <div className="wage__grid-scroll">
-            <table className="wage-table wage-table--wide">
-              <thead>
-                <tr>
-                  <th>번호</th>
-                  <th>성명</th>
-                  <th>직종</th>
-                  <th>입사일</th>
-                  <th className="wage-table__num">계속근로</th>
-                  <th className="wage-table__num">평균임금(추정)</th>
-                  <th className="wage-table__num">법정퇴직금</th>
-                  <th className="wage-table__num">기지급</th>
-                  <th className="wage-table__num">잔액</th>
-                </tr>
-              </thead>
-              <tbody>
-                {legalRows.map((r, i) => (
-                  <tr key={r.memberId}>
-                    <td>{i + 1}</td>
-                    <td className="wage-table__name">{r.memberName}</td>
-                    <td>{r.role}</td>
-                    <td className="wage-table__mono">{r.joinedAt.slice(0, 10)}</td>
-                    <td className="wage-table__num">
-                      {Math.floor(r.totalDays / 365)}년 {r.totalDays % 365}일
-                    </td>
-                    <td className="wage-table__num">{r.dailyWage.toLocaleString()}</td>
-                    <td className="wage-table__num wage-table__num--net">{r.computedAmount.toLocaleString()}</td>
-                    <td className="wage-table__num">{r.paidTotal.toLocaleString()}</td>
-                    <td className="wage-table__num wage-table__num--net">{(r.computedAmount - r.paidTotal).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td colSpan={6}>합계 ({legalRows.length}명)</td>
-                  <td className="wage-table__num wage-table__num--net">{legalTotal.toLocaleString()}</td>
-                  <td className="wage-table__num">{legalRows.reduce((s, r) => s + r.paidTotal, 0).toLocaleString()}</td>
-                  <td className="wage-table__num wage-table__num--net">{(legalTotal - legalRows.reduce((s, r) => s + r.paidTotal, 0)).toLocaleString()}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
-      </section>
-    </>
-  );
-}
 
 interface WageSortThProps {
   label: string;
@@ -2160,18 +1815,7 @@ function WageSortTh({ label, col, cur, dir, on, numeric }: WageSortThProps) {
   );
 }
 
-export function aggregateByRole(rows: WageMonthSummary['rows']): WageMonthSummary['byRole'] {
-  const map = new Map<string, { count: number; days: number; base: number; net: number }>();
-  for (const r of rows) {
-    const e = map.get(r.role) ?? { count: 0, days: 0, base: 0, net: 0 };
-    e.count += 1;
-    e.days += r.workDays;
-    e.base += r.baseAmount;
-    e.net += r.netAmount;
-    map.set(r.role, e);
-  }
-  return Array.from(map.entries()).map(([role, v]) => ({ role, ...v }));
-}
+/* aggregateByRole → src/pages/wage/utils/wageUtils.ts (V2) */
 
 export function ProgressMini({ value }: { value: number }) {
   const v = Math.max(0, Math.min(100, value));
@@ -2185,127 +1829,5 @@ export function ProgressMini({ value }: { value: number }) {
   );
 }
 
-function krw(n: number) {
-  if (!n) return '0원';
-  return n.toLocaleString() + '원';
-}
-function krwShort(n: number) {
-  if (!n) return '0';
-  if (n >= 100_000_000) return (n / 100_000_000).toFixed(1) + '억';
-  if (n >= 10_000) {
-    // 1만 ~ 1억 — 소수점 1자리까지 (19만 → 정확히 18.5만 같은 값 노출)
-    // 다만 .0 으로 떨어지면 정수만 표시 (803.0만 → 803만)
-    const v = (n / 10_000).toFixed(1);
-    const trimmed = v.endsWith('.0') ? v.slice(0, -2) : v;
-    // 803.5 → 「803.5만」, 803 → 「803만」 (콤마는 정수부에만 적용)
-    const [intPart, fracPart] = trimmed.split('.');
-    const intFmt = Number(intPart).toLocaleString();
-    return (fracPart ? `${intFmt}.${fracPart}` : intFmt) + '만';
-  }
-  return n.toLocaleString();
-}
-
-function mergeWage(all: WageMonthSummary[]): WageMonthSummary | null {
-  if (all.length === 0) return null;
-  if (all.length === 1) return all[0];
-  const first = all[0];
-  return {
-    year: first.year,
-    month: first.month,
-    rows: all.flatMap((s) => s.rows),
-    totalDays: all.reduce((sum, s) => sum + s.totalDays, 0),
-    totalBase: all.reduce((sum, s) => sum + s.totalBase, 0),
-    totalDeduction: all.reduce((sum, s) => sum + s.totalDeduction, 0),
-    totalNet: all.reduce((sum, s) => sum + s.totalNet, 0),
-    totalSeverance: all.reduce((sum, s) => sum + s.totalSeverance, 0),
-    byRole: aggregateByRole(all.flatMap((s) => s.rows)),
-  };
-}
-
-function mergeSeverance(all: SeveranceMonthSummary[]): SeveranceMonthSummary | null {
-  if (all.length === 0) return null;
-  if (all.length === 1) return all[0];
-  const first = all[0];
-  return {
-    year: first.year,
-    month: first.month,
-    rows: all.flatMap((s) => s.rows),
-    attendedToday: all.reduce((sum, s) => sum + s.attendedToday, 0),
-    totalAccrued: all.reduce((sum, s) => sum + s.totalAccrued, 0),
-    totalPaid: all.reduce((sum, s) => sum + s.totalPaid, 0),
-    totalBalance: all.reduce((sum, s) => sum + s.totalBalance, 0),
-  };
-}
-
-function MonthPicker({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  const [yStr, mStr] = value.split('-');
-  const year = Number(yStr);
-  const month = Number(mStr);
-
-  function shift(delta: number) {
-    let y = year;
-    let m = month + delta;
-    while (m < 1) { m += 12; y -= 1; }
-    while (m > 12) { m -= 12; y += 1; }
-    onChange(`${y}-${String(m).padStart(2, '0')}`);
-  }
-  function toThisMonth() {
-    const now = new Date();
-    onChange(localYearMonth(now));
-  }
-
-  const isThisMonth = (() => {
-    const now = new Date();
-    return year === now.getFullYear() && month === now.getMonth() + 1;
-  })();
-
-  const thisYear = new Date().getFullYear();
-  const years: number[] = [];
-  for (let y = thisYear - 5; y <= thisYear + 1; y += 1) years.push(y);
-
-  return (
-    <div className="wage-month-picker">
-      <button
-        type="button"
-        className="wage-month-picker__arrow"
-        onClick={() => shift(-1)}
-        aria-label="이전 달"
-      >‹</button>
-      <MacSelect
-              value={year}
-              onChange={(v) => onChange(`${v}-${String(month).padStart(2, '0')}`)}
-              className="wage-month-picker__year"
-              options={[...years.map((y) => (
-          ({ value: y, label: <>{y}년</> })
-        ))]}
-            />
-      <MacSelect
-              value={month}
-              onChange={(v) => onChange(`${year}-${String(v).padStart(2, '0')}`)}
-              className="wage-month-picker__month"
-              options={[...Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-          ({ value: m, label: <>{m}월</> })
-        ))]}
-            />
-      <button
-        type="button"
-        className="wage-month-picker__arrow"
-        onClick={() => shift(1)}
-        aria-label="다음 달"
-      >›</button>
-      {!isThisMonth && (
-        <button
-          type="button"
-          className="wage-month-picker__today"
-          onClick={toThisMonth}
-        >이번 달</button>
-      )}
-    </div>
-  );
-}
+/* krw, krwShort, mergeWage, mergeSeverance → src/pages/wage/utils/wageUtils.ts (V2)
+ * MonthPicker → src/pages/wage/components/MonthPicker.tsx (V2) */

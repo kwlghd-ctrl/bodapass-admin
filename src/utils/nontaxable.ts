@@ -7,7 +7,7 @@
  *  법정 한도 (2026년 기준):
  *    식대:           월 20만원까지
  *    자가운전보조금: 월 20만원까지
- *    출산·보육수당:   월 10만원까지
+ *    출산·보육수당:   6세 이하 자녀 1인당 월 20만원까지 (자녀 수에 비례)
  *    차량유지비:     조건별 (출장 실비 등)
  */
 
@@ -18,7 +18,7 @@ export const NONTAX_LIMITS = {
   meal: 200_000,
   vehicle: 200_000,
   travel: 0,           // 한도 없음 (실비 정산 기준)
-  childcare: 100_000,
+  childcare: 200_000,  // 2026 기준 — 6세 이하 자녀 1인당 월 20만원 비과세 한도
   other: 0,            // 한도 없음
 } as const;
 
@@ -31,16 +31,34 @@ export const NONTAX_LABELS: Record<keyof NonNullable<TeamMember['nontaxable']>, 
   other: '기타',
 };
 
+/**
+ * 출산·보육수당 한도 = 자녀 수 × 20만원 (2026 기준)
+ *   6세 이하 자녀가 N명이면 한도 = N × 200,000원.
+ *   childrenUnder6Count 가 제공되지 않으면 1명으로 가정.
+ */
+export function childcareLimit(childrenUnder6Count?: number): number {
+  const n = Math.max(0, Math.floor(childrenUnder6Count ?? 1));
+  return n * 200_000;
+}
+
 /** 한 멤버의 월 비과세 합계 — 한도 적용
  *  법정 한도(NONTAX_LIMITS)를 초과하는 부분은 「과세」로 자동 변환.
+ *
+ *  옵션 — context.childrenUnder6Count: 6세 이하 자녀 수 (출산·보육수당 한도 계산용).
+ *  미제공 시 자녀 1명 기준 (20만원) 적용.
  */
-export function totalNontaxable(member: TeamMember | undefined | null): number {
+export function totalNontaxable(
+  member: TeamMember | undefined | null,
+  context?: { childrenUnder6Count?: number },
+): number {
   const n = member?.nontaxable;
   if (!n) return 0;
   let total = 0;
   for (const k of Object.keys(NONTAX_LIMITS) as Array<keyof typeof NONTAX_LIMITS>) {
     const value = n[k] || 0;
-    const limit = NONTAX_LIMITS[k];
+    const limit = k === 'childcare'
+      ? childcareLimit(context?.childrenUnder6Count)
+      : NONTAX_LIMITS[k];
     total += limit > 0 ? Math.min(value, limit) : value;
   }
   return total;
@@ -49,12 +67,14 @@ export function totalNontaxable(member: TeamMember | undefined | null): number {
 /** 멤버의 월 「과세 보수」 — 보험료·세금 산정 기준
  *  과세 보수 = 월 지급액 - 비과세 합계
  *  · 비과세 합계는 한도 적용된 값 사용
+ *  · context.childrenUnder6Count 가 있으면 출산·보육수당 한도가 자녀 수에 비례.
  */
 export function taxableMonthlyWage(
   member: TeamMember | undefined | null,
   totalMonthlyPay: number,
+  context?: { childrenUnder6Count?: number },
 ): number {
-  const nontax = totalNontaxable(member);
+  const nontax = totalNontaxable(member, context);
   const taxable = totalMonthlyPay - nontax;
   return Math.max(0, Math.round(taxable));
 }
@@ -69,12 +89,17 @@ export interface NontaxBreakdown {
   exceeded: boolean;          // 한도 초과 여부
 }
 
-export function nontaxBreakdown(member: TeamMember | undefined | null): NontaxBreakdown[] {
+export function nontaxBreakdown(
+  member: TeamMember | undefined | null,
+  context?: { childrenUnder6Count?: number },
+): NontaxBreakdown[] {
   const n = member?.nontaxable ?? {};
   const result: NontaxBreakdown[] = [];
   for (const k of Object.keys(NONTAX_LIMITS) as Array<keyof typeof NONTAX_LIMITS>) {
     const input = n[k] || 0;
-    const limit = NONTAX_LIMITS[k];
+    const limit = k === 'childcare'
+      ? childcareLimit(context?.childrenUnder6Count)
+      : NONTAX_LIMITS[k];
     const applied = limit > 0 ? Math.min(input, limit) : input;
     if (input === 0) continue;
     result.push({

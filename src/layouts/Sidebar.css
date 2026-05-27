@@ -333,6 +333,67 @@
   to   { opacity: 1; transform: translateY(-50%) translateX(0); }
 }
 
+/* ─────────────────────────────────────────────────────────────
+ *  처리 필요 표시 — 「숨쉬기」 펄스 애니메이션
+ *  (Sidebar 의 NavItem.pulse=true 인 항목에 적용)
+ *  · 라벨 우측에 작은 점 + 부드러운 호흡 그라데이션
+ *  · 활성 상태(--active) 또는 포커스 상태에서는 펄스를 멈춰 산만함 방지
+ * ───────────────────────────────────────────────────────────── */
+.sidebar__item--pulse {
+  position: relative;
+}
+.sidebar__item--pulse::after {
+  content: "";
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #FF3B30;
+  transform: translateY(-50%);
+  box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.55);
+  animation: sidebar-breathe 1.8s ease-in-out infinite;
+  pointer-events: none;
+}
+/* 그룹 헤더 — chevron 자리를 비워두기 위해 점 위치 조정 */
+.sidebar__item--group.sidebar__item--pulse::after {
+  right: 32px;
+}
+/* 활성 상태에선 펄스 정지 (이미 그 메뉴에 들어와 있으므로) */
+.sidebar__item--active.sidebar__item--pulse::after,
+.sidebar__item--group-active.sidebar__item--pulse::after {
+  animation: none;
+  background: #34C759; /* 처리 진행중 톤 — 옅은 그린 */
+  box-shadow: none;
+}
+
+@keyframes sidebar-breathe {
+  0% {
+    transform: translateY(-50%) scale(0.85);
+    box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.55);
+    opacity: 0.85;
+  }
+  50% {
+    transform: translateY(-50%) scale(1.15);
+    box-shadow: 0 0 0 6px rgba(255, 59, 48, 0);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-50%) scale(0.85);
+    box-shadow: 0 0 0 0 rgba(255, 59, 48, 0);
+    opacity: 0.85;
+  }
+}
+
+/* 접근성 — 모션 줄이기 사용자에겐 정적 점만 표시 */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar__item--pulse::after {
+    animation: none;
+    box-shadow: none;
+  }
+}
+
 .sidebar__popover::before {
   content: "";
   position: absolute;

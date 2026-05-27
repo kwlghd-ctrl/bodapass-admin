@@ -1,5 +1,6 @@
 // FILE_VERSION 1777950500
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { DashboardLegalKpi } from '../components/legal/DashboardLegalKpi';
 import { createPortal } from 'react-dom';
 import { Link, useNavigate } from 'react-router-dom';
 import { PlusIcon } from '../components/Icon';
@@ -25,6 +26,21 @@ import { useAuth } from '../hooks/useAuth';
 import { displayPhone } from '../utils/phone';
 import { apiClient } from '../api/client';
 import type { Company, SiteCompany } from '../api/site.types';
+import {
+  krw,
+  krwShort,
+  k,
+  fmtKrPhone,
+  dedupById,
+  buildPeriodInfo,
+  getAccountManagerForSite,
+  fmtKoFullDateTime,
+  fmtKrwAmount,
+} from './dashboard/utils/format';
+import { MiniKpi } from './dashboard/components/MiniKpi';
+import { computeHeroKpiStats } from './dashboard/services/heroKpiStats';
+import { BoardCard } from './dashboard/components/BoardCard';
+import { NotificationCard } from './dashboard/components/NotificationCard';
 import './DashboardPage.css';
 
 /**
@@ -264,6 +280,10 @@ export function DashboardPage() {
       {topbarSlot && createPortal(topbarActions, topbarSlot)}
 
       {error && <div className="dash__error">{error}</div>}
+
+      {!loading && hasSites && (
+        <DashboardLegalKpi yearMonth={localYearMonth()} />
+      )}
 
       {!loading && !hasSites ? (
         <section className="dashboard__empty-row">
@@ -1113,42 +1133,7 @@ function CompactGlobalMeta({
   );
 }
 
-function krw(n: number): string {
-  return (n || 0).toLocaleString() + '원';
-}
-
-function krwShort(n: number) {
-  if (n >= 100_000_000_000) return `${(n / 100_000_000_000).toFixed(1)}천억`;
-  if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(1)}억`;
-  if (n >= 10_000) return `${Math.round(n / 10_000).toLocaleString()}만`;
-  return n.toLocaleString();
-}
-
-/* ───────── 계정 → 현장 담당자 매핑 헬퍼 ───────── */
-/**
- * 설정 → 계정 관리에서 등록된 계정 중,
- * role 이 MANAGER 이고 permissions.scope 가 해당 현장 id 인 사람을 찾는다.
- * 없으면 null 반환 (대시보드는 site.manager 로 폴백).
- */
-function getAccountManagerForSite(siteId: string): { name: string; phone: string } | null {
-  try {
-    const raw = localStorage.getItem('ilgampack_admin:accounts');
-    if (!raw) return null;
-    const list = JSON.parse(raw) as Array<{
-      name: string;
-      phone: string;
-      role: 'OWNER' | 'MANAGER' | 'STAFF';
-      permissions?: { scope?: string };
-    }>;
-    const m = list.find(
-      (a) => a.role === 'MANAGER' && a.permissions?.scope === siteId,
-    );
-    if (!m) return null;
-    return { name: m.name, phone: m.phone };
-  } catch {
-    return null;
-  }
-}
+/* krw, krwShort, getAccountManagerForSite → src/pages/dashboard/utils/format.ts (V1) */
 
 /* ───────── ② 현장 탭(폴더 형태) ───────── */
 
@@ -2009,11 +1994,8 @@ function DailyOpsStrip({
     },
   ];
 
-  const formatTime = (d: Date) =>
-    d.toLocaleString('ko-KR', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    });
+  // Phase CC3 — formatTime 은 dashboard/utils/format#fmtKoFullDateTime 으로 위임.
+  const formatTime = fmtKoFullDateTime;
 
   const showHeader = view === 'sidebar' || view === 'monitor' || view === 'all';
   const showTrust = view === 'sidebar' || view === 'monitor' || view === 'all';
@@ -2353,9 +2335,8 @@ function OpsStripDrillModal({
   };
 
   // 액션 핸들러 — 실 운영시 API 연결. 현재는 mock 알림.
-  function fmtKrw(n: number) {
-    return n.toLocaleString('ko-KR') + '원';
-  }
+  // Phase CC3 — fmtKrw 은 dashboard/utils/format#fmtKrwAmount 으로 위임.
+  const fmtKrw = fmtKrwAmount;
   function fmtDate(iso: string | null) {
     if (!iso) return localDateStr();
     return iso.slice(0, 10);
@@ -2844,168 +2825,10 @@ function RejectReasonDialog({
   );
 }
 
-function buildPeriodInfo(start: string, end: string) {
-  const s = new Date(start).getTime();
-  const e = new Date(end).getTime();
-  const now = Date.now();
-  const totalDays = Math.max(1, Math.round((e - s) / 86_400_000));
-  const remainDays = Math.max(0, Math.round((e - now) / 86_400_000));
-  const elapsedPct = Math.max(0, Math.min(100, ((now - s) / (e - s)) * 100));
-  const months = Math.round(totalDays / 30);
-  const years = Math.floor(months / 12);
-  const remMonths = months % 12;
-  const duration =
-    years > 0
-      ? `${years}년 ${remMonths > 0 ? remMonths + '개월' : ''}`.trim()
-      : `${months}개월`;
-  return { totalDays, remainDays, elapsedPct, duration };
-}
+/* buildPeriodInfo → src/pages/dashboard/utils/format.ts (V1) */
 
-/* ───────── 게시판 카드 (현장 단위 공지·메모) ───────── */
 
-interface BoardPost {
-  id: string;
-  siteId: string;
-  category: '공지' | '안전' | '일정' | '자재';
-  title: string;
-  author: string;
-  date: string;
-}
 
-const BOARD_KEY = 'ilgampack_admin:board';
-
-/** 시드 기본 게시글 (현장별 소량) */
-function seedBoardPosts(siteId: string, siteName: string): BoardPost[] {
-  const today = new Date();
-  const d = (offset: number) =>
-    localDateStr(new Date(today.getTime() - offset * 86_400_000));
-  return [
-    { id: `${siteId}-1`, siteId, category: '공지', title: `${siteName.split(' ').slice(0, 2).join(' ')} 1차 자재 검수 일정 안내`, author: '김홍길', date: d(0) },
-    { id: `${siteId}-2`, siteId, category: '안전', title: '주말 근무자 안전모 착용 의무', author: '이안전', date: d(1) },
-    { id: `${siteId}-3`, siteId, category: '일정', title: '다음 주 콘크리트 타설 (3일차)', author: '박철수', date: d(2) },
-    { id: `${siteId}-4`, siteId, category: '자재', title: '거푸집 추가 발주 — 관리자 확인 요청', author: '김홍길', date: d(4) },
-  ];
-}
-
-function loadBoardPosts(siteId: string, siteName: string): BoardPost[] {
-  try {
-    const raw = localStorage.getItem(BOARD_KEY);
-    if (raw) {
-      const all = JSON.parse(raw) as BoardPost[];
-      const here = all.filter((p) => p.siteId === siteId);
-      if (here.length > 0) return here;
-    }
-  } catch { /* ignore */ }
-  // 시드
-  const seeded = seedBoardPosts(siteId, siteName);
-  try {
-    const raw = localStorage.getItem(BOARD_KEY);
-    const all: BoardPost[] = raw ? JSON.parse(raw) : [];
-    localStorage.setItem(BOARD_KEY, JSON.stringify([...all, ...seeded]));
-  } catch { /* ignore */ }
-  return seeded;
-}
-
-function BoardCard({ siteId, siteName }: { siteId: string; siteName: string }) {
-  const [posts, setPosts] = useState<BoardPost[]>([]);
-  useEffect(() => {
-    setPosts(loadBoardPosts(siteId, siteName));
-  }, [siteId, siteName]);
-
-  return (
-    <div className="board-card">
-      <header className="board-card__head">
-        <div>
-          <h3>📋 현장 게시판</h3>
-          <p>현장 공지·안전·일정·자재 메모</p>
-        </div>
-        <button type="button" className="board-card__more">+ 글 작성</button>
-      </header>
-      {posts.length === 0 ? (
-        <p className="board-card__empty">게시글이 없습니다.</p>
-      ) : (
-        <ul className="board-card__list">
-          {posts.slice(0, 5).map((p) => (
-            <li key={p.id} className="board-post">
-              <span className={'board-post__cat board-post__cat--' + categoryClass(p.category)}>
-                {p.category}
-              </span>
-              <span className="board-post__title">{p.title}</span>
-              <span className="board-post__meta">
-                {p.author} · {p.date}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function categoryClass(c: BoardPost['category']): string {
-  switch (c) {
-    case '공지': return 'notice';
-    case '안전': return 'safety';
-    case '일정': return 'schedule';
-    case '자재': return 'material';
-  }
-}
-
-function NotificationCard({ siteId: _siteId }: { siteId: string }) {
-  const [logs, setLogs] = useState<DispatchLog[]>([]);
-  useEffect(() => {
-    setLogs(getDispatchLogs().slice(0, 5));
-  }, [_siteId]);
-
-  return (
-    <div className="board-card">
-      <header className="board-card__head">
-        <div>
-          <h3>💬 알림톡 발송</h3>
-          <p>최근 카카오/SMS 발송 5건</p>
-        </div>
-        <Link to="/notifications" className="board-card__more">전체 보기 →</Link>
-      </header>
-      {logs.length === 0 ? (
-        <p className="board-card__empty">발송 내역이 없습니다. 팀원 등록·임금 발송 시 자동 추가됩니다.</p>
-      ) : (
-        <ul className="board-card__list">
-          {logs.map((l) => (
-            <li key={l.id} className="board-post">
-              <span className={'board-post__cat board-post__cat--' + (l.channel === 'KAKAO' ? 'kakao' : 'sms')}>
-                {l.channel === 'KAKAO' ? '카톡' : 'SMS'}
-              </span>
-              <span className="board-post__title">{l.toName} · {l.toPhone}</span>
-              <span className="board-post__meta">
-                {new Date(l.sentAt).toLocaleString()} · {l.status === 'SENT' ? '✓' : '실패'}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function MiniKpi({
-  label,
-  value,
-  sub,
-  color,
-}: {
-  label: string;
-  value: string;
-  sub: string;
-  color: string;
-}) {
-  return (
-    <div className="mini-kpi">
-      <p className="mini-kpi__label">{label}</p>
-      <p className="mini-kpi__value" style={{ color }}>{value}</p>
-      <p className="mini-kpi__sub">{sub}</p>
-    </div>
-  );
-}
 
 /* 비번 반장 상태 — localStorage 키: ilgampack_admin:foremanStatus
  *  PENDING   = 대기중 (계약 송부 전, 평상시 기본 상태)
@@ -3030,13 +2853,7 @@ function saveForemanStatus(map: Record<string, ForemanContractStatus>) {
   } catch { /* ignore */ }
 }
 
-/** 010-1234-5678 형식 */
-function fmtKrPhone(p: string): string {
-  const d = (p || '').replace(/\D/g, '');
-  if (d.length === 11) return d.slice(0, 3) + '-' + d.slice(3, 7) + '-' + d.slice(7);
-  if (d.length === 10) return d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6);
-  return p;
-}
+/* fmtKrPhone → src/pages/dashboard/utils/format.ts (V1) */
 
 /** 근무중 + 비번 반장을 한 타일에 합쳐 렌더링 — 좌측(dash-main) 높이에 맞춰 늘어남 */
 function ForemanCombinedTile({
@@ -3637,16 +3454,7 @@ function ForemanSafetyDialog({
 
 /* ───────── id 중복 제거 helper ───────── */
 
-function dedupById<T extends { id: string }>(arr: T[]): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const x of arr) {
-    if (seen.has(x.id)) continue;
-    seen.add(x.id);
-    out.push(x);
-  }
-  return out;
-}
+/* dedupById → src/pages/dashboard/utils/format.ts (V1) */
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -3663,12 +3471,7 @@ function dedupById<T extends { id: string }>(arr: T[]): T[] {
 
 // ───── 공통 헬퍼 ─────────────────────────────────────────────
 
-function k(n: number): string {
-  if (!Number.isFinite(n) || n === 0) return '0';
-  if (n >= 100_000_000) return (n / 100_000_000).toFixed(1).replace(/\.0$/, '') + '억';
-  if (n >= 10_000) return Math.round(n / 10_000).toLocaleString() + '만';
-  return n.toLocaleString();
-}
+/* k (compact KRW) → src/pages/dashboard/utils/format.ts (V1) */
 
 interface SiteOpsStat {
   siteId: string;
@@ -3763,46 +3566,11 @@ function DashHeroKPI({
   sites, todayBySite, allMembers, wageBySite,
 }: { sites: any[]; todayBySite: Record<string, any>; allMembers: any[]; wageBySite: Record<string, any> }) {
   const navigate = useNavigate();
-  const stats = useMemo(() => {
-    const inProgress = sites.filter((s) => s.status !== 'COMPLETED');
-    let totalAttended = 0, totalDone = 0, totalWorking = 0;
-    let totalPayToday = 0;
-    let manualBoost = 0, gpsBoost = 0;
-    let totalRecords = 0;
-    for (const s of inProgress) {
-      const t = todayBySite[s.id];
-      if (!t) continue;
-      totalAttended += (t.summary?.workingCount ?? 0) + (t.summary?.doneCount ?? 0);
-      totalDone    += t.summary?.doneCount ?? 0;
-      totalWorking += t.summary?.workingCount ?? 0;
-      for (const tm of t.members ?? []) {
-        if (!tm.record) continue;
-        totalRecords += 1;
-        totalPayToday += tm.record.payAmount || 0;
-        if (tm.record.checkInMethod === 'MANUAL') manualBoost += 1;
-        if (tm.record.geofenceResult && tm.record.geofenceResult !== 'INSIDE') gpsBoost += 1;
-      }
-    }
-    // 「오늘 노무비」 = 오늘 출역 records 의 payAmount 합산.
-    //   대시보드와 노임비 화면 모두 같은 attendance bucket 을 본다.
-    const totalPay = totalPayToday;
-    const totalMembers = allMembers.filter((m) => !m.leftAt).length;
-    const noContract = allMembers.filter((m) => !m.leftAt && !m.contractSigned).length;
-    const noEdu = allMembers.filter((m) => !m.leftAt && !m.safetyEduCompleted).length;
-    const denomR = Math.max(1, totalRecords);
-    const denomM = Math.max(1, totalMembers);
-    const score = Math.max(0, Math.round(100
-      - (manualBoost / denomR) * 30
-      - (gpsBoost / denomR) * 30
-      - (noContract / denomM) * 20
-      - (noEdu / denomM) * 20));
-    const attendRate = totalMembers > 0 ? Math.round((totalAttended / totalMembers) * 100) : 0;
-    const needAction = manualBoost + gpsBoost + noContract + noEdu;
-    return {
-      totalAttended, totalDone, totalWorking, totalMembers,
-      totalPay, score, needAction, attendRate,
-    };
-  }, [sites, todayBySite, allMembers]);
+  // Phase BB6 — 순수 계산은 services/heroKpiStats 로 분리.
+  const stats = useMemo(
+    () => computeHeroKpiStats({ sites, todayBySite, allMembers }),
+    [sites, todayBySite, allMembers],
+  );
 
   const scoreTone = stats.score >= 85 ? 'green' : stats.score >= 70 ? 'amber' : 'red';
   const scoreLabel = stats.score >= 85 ? '정상' : stats.score >= 70 ? '주의' : '위험';
