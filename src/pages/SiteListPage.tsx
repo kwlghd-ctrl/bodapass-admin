@@ -791,12 +791,13 @@ export function SiteListPage() {
 
 /* ────────── 모듈 헬퍼 ────────── */
 
-function krwShort(n: number): string {
-  if (!n) return '0원';
-  if (n >= 100_000_000_000) return (n / 100_000_000_000).toFixed(1) + '천억';
-  if (n >= 100_000_000) return (n / 100_000_000).toFixed(1) + '억';
-  if (n >= 10_000) return Math.round(n / 10_000).toLocaleString() + '만';
-  return n.toLocaleString();
+function krwShort(n: number | undefined | null): string {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '0원';
+  if (v >= 100_000_000_000) return (v / 100_000_000_000).toFixed(1) + '천억';
+  if (v >= 100_000_000) return (v / 100_000_000).toFixed(1) + '억';
+  if (v >= 10_000) return Math.round(v / 10_000).toLocaleString() + '만';
+  return v.toLocaleString();
 }
 
 /* ────────── 우측 슬라이드 드로어 — 현장 상세 + 수정 ────────── */
