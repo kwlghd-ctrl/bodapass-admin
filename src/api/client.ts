@@ -124,9 +124,9 @@ let pendingQueue: Array<(token: string | null) => void> = [];
 apiClient.interceptors.response.use(
   (res) => applyV2ResponseShape(res), // 실서버 배열 응답 → admin wrapper 형태로 변환
   async (error: AxiosError) => {
-    const originalReq = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+    const originalReq = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
 
-    if (error.response?.status === 401 && !originalReq._retry) {
+    if (error.response?.status === 401 && originalReq && !originalReq._retry) {
       originalReq._retry = true;
 
       if (isRefreshing) {
