@@ -470,7 +470,7 @@ export function SiteListPage() {
                                 title={`일액 결정: ${dec.source} · ${dec.policy}${dec.warning ? ` · ${dec.warning}` : ''}`}
                                 style={{ marginLeft: 8, fontSize: 11, color: '#8e8e93' }}
                               >
-                                일액 {dec.fundDaily.toLocaleString()}원
+                                일액 {Number(dec.fundDaily ?? 0).toLocaleString()}원
                               </span>
                             );
                           })()}
@@ -1279,11 +1279,12 @@ function SiteDetail({
 
   const ro = !editing;
 
-  function fmtAmt(n: number) {
-    if (!n) return '0원';
-    if (n >= 100_000_000) return (n / 100_000_000).toFixed(1) + '억원';
-    if (n >= 10_000) return Math.round(n / 10_000).toLocaleString() + '만원';
-    return n.toLocaleString() + '원';
+  function fmtAmt(n: number | undefined | null) {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v <= 0) return '0원';
+    if (v >= 100_000_000) return (v / 100_000_000).toFixed(1) + '억원';
+    if (v >= 10_000) return Math.round(v / 10_000).toLocaleString() + '만원';
+    return v.toLocaleString() + '원';
   }
 
   // 탭 미지정 시 모두 보여주기 (이전 화면 호환)
@@ -2045,11 +2046,12 @@ function CompletionDialog({
     (it) => it.budget > 0 && it.settled / it.budget < SETTLE_THRESHOLD,
   );
 
-  function fmt(n: number): string {
-    if (!n) return '0원';
-    if (n >= 100_000_000) return (n / 100_000_000).toFixed(1) + '억';
-    if (n >= 10_000) return Math.round(n / 10_000).toLocaleString() + '만';
-    return n.toLocaleString();
+  function fmt(n: number | undefined | null): string {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v <= 0) return '0원';
+    if (v >= 100_000_000) return (v / 100_000_000).toFixed(1) + '억';
+    if (v >= 10_000) return Math.round(v / 10_000).toLocaleString() + '만';
+    return v.toLocaleString();
   }
 
   return (
